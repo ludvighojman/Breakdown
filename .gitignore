@@ -1,0 +1,21 @@
+# Only the built add-in is tracked; Excel workbooks elsewhere are local. DO NOT REMOVE
+*.xlsx
+*.xlsm
+*.xls
+*.xlsb
+*.xlam
+!dist/Breakdown.xlam
+
+# Excel temporary and backup files
+~$*
+*.xlk
+*.frx
+
+# Build tool dependencies
+node_modules/
+
+# macOS / Windows clutter
+.DS_Store
+._*
+Thumbs.db
+desktop.ini

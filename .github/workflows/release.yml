@@ -1,0 +1,42 @@
+name: Release
+
+# Push a version tag (for example `git tag v1.0.0 && git push origin v1.0.0`)
+# to publish a GitHub Release with dist/Breakdown.xlam attached. The README's
+# download link, releases/latest/download/Breakdown.xlam, always serves the
+# newest release.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Publish Breakdown.xlam
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: tools/xlam/package-lock.json
+
+      - name: Check dist/Breakdown.xlam matches src/
+        working-directory: tools/xlam
+        run: |
+          npm ci
+          npm test
+          npm run check
+
+      - name: Create the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" dist/Breakdown.xlam \
+            --title "Breakdown $GITHUB_REF_NAME" \
+            --notes "Download Breakdown.xlam below, then follow the install steps: https://github.com/$GITHUB_REPOSITORY#install. On Windows, unblock the file first (right-click, Properties, tick Unblock)."

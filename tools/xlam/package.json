@@ -1,0 +1,15 @@
+{
+  "name": "breakdown-xlam-build",
+  "private": true,
+  "description": "Builds dist/Breakdown.xlam from the VBA source in src/",
+  "type": "module",
+  "scripts": {
+    "build": "node build.mjs",
+    "check": "node build.mjs --check",
+    "test": "node --test"
+  },
+  "dependencies": {
+    "cfb": "^1.2.2",
+    "fflate": "^0.8.2"
+  }
+}

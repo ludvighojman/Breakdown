@@ -1,0 +1,60 @@
+<customUI xmlns="http://schemas.microsoft.com/office/2009/07/customui">
+    <ribbon>
+        <tabs>
+            <tab id="formulaToolsTab" label="Breakdown" keytip="T">
+                <group id="traceGroup" label="Formulas">
+                    <button id="tracePrecedentsBtn"
+                            label="Trace Precedents"
+                            keytip="P"
+                            size="large"
+                            imageMso="TracePrecedents"
+                            onAction="FindAndDisplayPrecedents"
+                            screentip="Trace Precedents"
+                            supertip="Shows all cells that provide data to the selected cell"/>
+                    <button id="traceDependentsBtn"
+                            label="Trace Dependents"
+                            keytip="D"
+                            size="large"
+                            imageMso="TraceDependents"
+                            onAction="FindAndDisplayDependents"
+                            screentip="Trace Dependents"
+                            supertip="Shows all cells that depend on the selected cell"/>
+                </group>
+                <group id="consistencyGroup" label="Auditing">
+                    <button id="checkHorizFormulasBtn"
+                            label="Horizontal Consistency"
+                            size="large"
+                            imageMso="FormulaEvaluate"
+                            onAction="OnCheckHorizontalConsistency"
+                            screentip="Check Horizontal Formula Consistency"
+                            supertip="Checks if formulas are consistent across rows"/>
+                </group>
+                <group id="formatGroup" label="Formatting">
+                    <button id="wrapWithErrorBtn"
+                            label="Error Wrap"
+                            size="large"
+                            imageMso="ErrorChecking"
+                            onAction="WrapWithError"
+                            screentip="Create Error Wrap"
+                            supertip="Wraps the selected formula with an IFERROR statement"/>
+                    <button id="autoColorBtn"
+                            label="Auto-color Numbers"
+                            size="large"
+                            imageMso="AutoFormatChange"
+                            onAction="DoAutoColorCells"
+                            screentip="Auto-color Numbers"
+                            supertip="Colors cells based on their content type (formulas, links, etc.)"/>
+                </group>
+                <group id="settingsGroup" label="Settings">
+                    <button id="settingsBtn"
+                            label="Settings"
+                            size="large"
+                            imageMso="PropertySheet"
+                            onAction="ShowSettingsForm"
+                            screentip="Settings"
+                            supertip="Configure the auto-color colors, the error-wrap value and the trace limits"/>
+                </group>
+            </tab>
+        </tabs>
+    </ribbon>
+</customUI>
