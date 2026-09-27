@@ -181,7 +181,3 @@ The build writes the VBA as source only, so Excel compiles it when it loads the 
 Keep the VBA Mac-compatible: put Windows API `Declare` statements inside `#If Mac Then … #Else … #End If` with a Mac fallback, and don't use Windows-only COM objects such as `VBScript.RegExp` or `Scripting.Dictionary`. [CLAUDE.md](CLAUDE.md) has the full list of rules.
 
 To publish a release, push a version tag such as `v1.0.0`. The [release workflow](.github/workflows/release.yml) checks the build and attaches `Breakdown.xlam` to a GitHub Release, which the download links above always point to.
-
-## Credits and licence
-
-Breakdown is based on [XLerate](https://github.com/omegarhovega/XLerate) by omegarhovega. It is released under the [MIT License](LICENSE).
