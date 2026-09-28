@@ -184,4 +184,4 @@ To publish a release, push a version tag such as `v1.0.0`. The [release workflow
 
 ## Credits and licence
 
-Breakdown is based on [XLerate](https://github.com/omegarhovega/XLerate) by omegarhovega. It is released under the [MIT License](LICENSE).
+Breakdown is based on [XLerate](https://github.com/omegarhovega/XLerate) by omegarhovega. It is released under the [License](LICENSE).
