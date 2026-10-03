@@ -667,10 +667,7 @@ End Function
 Public Function CornerPicture(ByVal r As Long, ByVal bgColor As Long, ByVal borderColor As Long, _
                               ByVal fillColor As Long, ByVal corner As Long) As Object
     Dim key As String
-    Dim path As String
     Dim bytes() As Byte
-    Dim fileNumber As Integer
-    Dim fileOpen As Boolean
 
     If CornerPictures Is Nothing Then Set CornerPictures = New Collection
     key = "v1-" & r & "-" & Hex$(bgColor) & "-" & Hex$(borderColor) & "-" & Hex$(fillColor) & "-" & corner
@@ -679,34 +676,78 @@ Public Function CornerPicture(ByVal r As Long, ByVal bgColor As Long, ByVal bord
     On Error GoTo 0
     If Not CornerPicture Is Nothing Then Exit Function
 
-    On Error GoTo Failed
-    path = CornerFolder() & "breakdown-corner-" & key & ".bmp"
     bytes = CornerBitmap(r, bgColor, borderColor, fillColor, corner)
+    Set CornerPicture = BitmapPicture(bytes, "breakdown-corner-" & key & ".bmp")
+    If Not CornerPicture Is Nothing Then CornerPictures.Add CornerPicture, key
+End Function
+
+' A bitmap loaded as a picture, through a file of that name in Excel's temp
+' folder (inside its sandbox on Mac); Nothing if that fails
+Public Function BitmapPicture(bytes() As Byte, ByVal fileName As String) As Object
+    Dim folder As String
+    Dim fileNumber As Integer
+    Dim fileOpen As Boolean
+
+    On Error GoTo Failed
+#If Mac Then
+    folder = Environ("TMPDIR")
+#Else
+    folder = Environ("TEMP")
+#End If
+    If Len(folder) = 0 Then folder = ThisWorkbook.Path
+    If Right$(folder, 1) <> Application.PathSeparator Then folder = folder & Application.PathSeparator
+
     fileNumber = FreeFile
-    Open path For Binary Access Write As #fileNumber
+    Open folder & fileName For Binary Access Write As #fileNumber
     fileOpen = True
     Put #fileNumber, 1, bytes
     Close #fileNumber
     fileOpen = False
-    Set CornerPicture = LoadPicture(path)
-    CornerPictures.Add CornerPicture, key
+    Set BitmapPicture = LoadPicture(folder & fileName)
     Exit Function
 
 Failed:
     If fileOpen Then Close #fileNumber
-    Set CornerPicture = Nothing
+    Set BitmapPicture = Nothing
 End Function
 
-' Excel's temp folder (inside its sandbox on Mac), else the add-in's folder
-Private Function CornerFolder() As String
-#If Mac Then
-    CornerFolder = Environ("TMPDIR")
-#Else
-    CornerFolder = Environ("TEMP")
-#End If
-    If Len(CornerFolder) = 0 Then CornerFolder = ThisWorkbook.Path
-    If Right$(CornerFolder, 1) <> Application.PathSeparator Then CornerFolder = CornerFolder & Application.PathSeparator
+' A black 24-bit BMP, pixelsWide x pixelsHigh: a 14-byte file header and a
+' 40-byte info header, then the rows bottom-up, each padded to a multiple of
+' 4 bytes
+Public Function NewBitmap(ByVal pixelsWide As Long, ByVal pixelsHigh As Long) As Byte()
+    Dim bytes() As Byte
+    Dim stride As Long
+
+    stride = ((3 * pixelsWide + 3) \ 4) * 4
+    ReDim bytes(0 To 54 + stride * pixelsHigh - 1)
+    bytes(0) = 66                                ' "B"
+    bytes(1) = 77                                ' "M"
+    PutLong bytes, 2, 54 + stride * pixelsHigh   ' File size
+    PutLong bytes, 10, 54                        ' Offset of the pixels
+    PutLong bytes, 14, 40                        ' Info header size
+    PutLong bytes, 18, pixelsWide
+    PutLong bytes, 22, pixelsHigh
+    bytes(26) = 1                                ' Planes
+    bytes(28) = 24                               ' Bits per pixel
+    PutLong bytes, 34, stride * pixelsHigh       ' Pixel data size
+    PutLong bytes, 38, 2835                      ' 72 dpi
+    PutLong bytes, 42, 2835
+    NewBitmap = bytes
 End Function
+
+' Set pixel (x, y) of a NewBitmap, counted from the top-left, to an RGB() colour
+Public Sub SetPixel(bytes() As Byte, ByVal x As Long, ByVal y As Long, ByVal rgbColor As Long)
+    Dim pixelsWide As Long
+    Dim pixelsHigh As Long
+    Dim pos As Long
+
+    pixelsWide = bytes(18) + bytes(19) * &H100&
+    pixelsHigh = bytes(22) + bytes(23) * &H100&
+    pos = 54 + (pixelsHigh - 1 - y) * (((3 * pixelsWide + 3) \ 4) * 4) + 3 * x
+    bytes(pos) = (rgbColor \ &H10000) And &HFF   ' Blue
+    bytes(pos + 1) = (rgbColor \ &H100) And &HFF ' Green
+    bytes(pos + 2) = rgbColor And &HFF           ' Red
+End Sub
 
 ' A 24-bit BMP of an r x r corner square. The corner's circle has radius r and
 ' is centred on the square's inner corner; the border ring, if any, is the
@@ -724,23 +765,8 @@ Private Function CornerBitmap(ByVal r As Long, ByVal bgColor As Long, ByVal bord
     Dim outer As Double
     Dim inner As Double
 
-    ' Header: 14-byte file header and 40-byte info header; rows run bottom-up
-    ' and are padded to a multiple of 4 bytes
+    bytes = NewBitmap(r, r)
     stride = ((3 * r + 3) \ 4) * 4
-    ReDim bytes(0 To 54 + stride * r - 1)
-    bytes(0) = 66                        ' "B"
-    bytes(1) = 77                        ' "M"
-    PutLong bytes, 2, 54 + stride * r    ' File size
-    PutLong bytes, 10, 54                ' Offset of the pixels
-    PutLong bytes, 14, 40                ' Info header size
-    PutLong bytes, 18, r                 ' Width
-    PutLong bytes, 22, r                 ' Height
-    bytes(26) = 1                        ' Planes
-    bytes(28) = 24                       ' Bits per pixel
-    PutLong bytes, 34, stride * r        ' Pixel data size
-    PutLong bytes, 38, 2835              ' 72 dpi
-    PutLong bytes, 42, 2835
-
     If corner Mod 2 = 0 Then cx = r Else cx = 0
     If corner < 2 Then cy = r Else cy = 0
     For j = 0 To r - 1

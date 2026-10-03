@@ -20,8 +20,8 @@ Just a single file to download and you're good to go!!!
 | **Trace Dependents** | The same, for every cell that depends on the active cell. |
 | **Horizontal Consistency** | Marks each formula on the sheet green or red, depending on whether it matches the formula next to it. |
 | **Error Wrap** | Wraps the selected formulas in `IFERROR`. |
-| **Auto-color Numbers** | Colours the selection by the financial-modelling convention: blue inputs, black formulas, green links to other sheets, red external links and errors. |
-| **Settings** | Change the colours Auto-color Numbers uses, the Error Wrap fallback value, how deep traces go, and the trace window's theme. |
+| **Auto-color Numbers** | Colours the selection by the financial-modelling convention: blue inputs, black formulas, green links to other sheets, red external links and errors. Inputs also get a fill and border you design in Settings. |
+| **Settings** | Change the colours Auto-color Numbers uses, the fill and border of input cells, the Error Wrap fallback value, how deep traces go, and the trace window's theme. |
 
 ## Install
 
@@ -63,7 +63,7 @@ The **Breakdown** tab appears in the ribbon, and Excel loads it every time it st
 2. Download the new `Breakdown.xlam` and replace the old one in the add-ins folder. On Windows, **Unblock** it first.
 3. Start Excel.
 
-Updating resets the Auto-color Numbers colours and the Error Wrap value to their defaults. Trace settings are kept.
+Updating resets the Auto-color Numbers colours and the Error Wrap value to their defaults. The input cell format and the trace settings are kept.
 
 ### Uninstall
 
@@ -74,8 +74,8 @@ Open the add-ins dialog (**Tools → Excel Add-ins…** on Mac, **File → Optio
 Breakdown is a macro add-in, so Excel asks before running it. Answer: Yes!
 
 - Breakdown doesn't connect to the internet, and it collects no data.
-- The only files it writes, apart from saving its own settings, are a few tiny images of the trace window's rounded corners, in Excel's temp folder.
-- It only changes cells when you ask it to: Error Wrap rewrites the selected formulas, Auto-color Numbers changes font colours, and Horizontal Consistency adds fill marks that it removes again on the second click.
+- The only files it writes, apart from saving its own settings, are a few tiny images, of the trace window's rounded corners and the input cell preview in Settings, in Excel's temp folder.
+- It only changes cells when you ask it to: Error Wrap rewrites the selected formulas, Auto-color Numbers changes font colours and formats input cells, and Horizontal Consistency adds fill marks that it removes again on the second click.
 - All of its code is in this repository, in [`src/`](src), for anyone to read.
 
 ## Using Breakdown
@@ -127,6 +127,25 @@ Select a range and click **Auto-color Numbers**. It changes the font colour of e
 | Links to other workbooks, external data (`WEBSERVICE`), and errors other than `#N/A` | Red `#FF0000` |
 
 Text, dates, hyperlinks and blank cells are left as they are. You can change the colours in **Settings → Auto-Color**.
+
+Inputs also get a fill and a border. Design them under **Input cell format** in **Settings → Auto-Color**: click a fill, pick a border, and the preview shows the cell in your input colour.
+
+| Fills | Borders |
+|---|---|
+| Light yellow `#FFFF99` (default) | Thin light grey `#D9D9D9` (default) |
+| Pale yellow `#FFF2CC` | Thin grey `#808080` |
+| Cream `#FFFFCC` | Thin black |
+| Peach `#FFCC99`, Excel's own Input style | Dotted grey (hairline) |
+| Light orange `#FCE4D6` | Dashed grey |
+| Light blue `#DDEBF7` | |
+| Blue-grey `#E7F0F3` | |
+| Light turquoise `#CCFFFF` | |
+| Light green `#E2EFDA` | |
+| Light grey `#F2F2F2` | |
+
+**No fill** and **No border** keep the cell's own fill and borders. Choose both if you only want the input colour.
+
+A formula or error that is still in the input colour was an input before, for example one you replaced with a formula. The next time you run Auto-color Numbers on it, it also loses the fill and borders from the lists above. Other fills and borders are left alone.
 
 ### Keyboard shortcuts (Windows)
 

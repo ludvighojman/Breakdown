@@ -2,6 +2,24 @@ Option Explicit
 
 Private Const NAME_PREFIX As String = "AutoColor_"
 
+' Input cell format choices (see InputFillName and InputBorderName)
+Public Const INPUT_FILL_COUNT As Long = 10      ' Fills 1 to 10; 0 is no fill
+Public Const INPUT_BORDER_COUNT As Long = 5     ' Borders 1 to 5; 0 is no border
+Public Const NO_FILL As Long = -1
+Public Const DEFAULT_INPUT_FILL As Long = 1     ' Light yellow
+Public Const DEFAULT_INPUT_BORDER As Long = 1   ' Thin light grey
+
+' The input cell preview in Settings is drawn in screen pixels, the way Excel
+' draws a cell at 100% zoom: PREVIEW_SCALE pixels per point (a Retina screen
+' on Mac), and lines LINE_PIXELS wide
+#If Mac Then
+Public Const PREVIEW_SCALE As Single = 2
+Private Const LINE_PIXELS As Long = 2
+#Else
+Public Const PREVIEW_SCALE As Single = 4 / 3
+Private Const LINE_PIXELS As Long = 1
+#End If
+
 ' Function to get color from saved settings or return default
 Private Function GetSavedColor(colorName As String, defaultColor As Long) As Long
     On Error Resume Next
@@ -44,30 +62,238 @@ Public Sub AutoColorCells()
 
     Dim cell As Range
     Dim formulaText As String
+    Dim inputCells As Range
     For Each cell In usedCells
         If IsErrorValue(cell) Then
-            cell.Font.Color = colorExternal
+            ColorNonInput cell, colorExternal, colorInput
         ElseIf cell.HasFormula Then
             ' Text inside "quotes" is not part of any reference
             formulaText = WithoutStringLiterals(cell.Formula)
             If IsWorkbookLink(formulaText) Or IsExternalData(formulaText) Then
-                cell.Font.Color = colorExternal
+                ColorNonInput cell, colorExternal, colorInput
             ElseIf InStr(1, formulaText, "!") > 0 Then
-                cell.Font.Color = colorWorksheetLink
+                ColorNonInput cell, colorWorksheetLink, colorInput
             ElseIf IsInput(cell, formulaText) Then
-                cell.Font.Color = colorInput
+                AddCell inputCells, cell
             Else
-                cell.Font.Color = colorFormula
+                ColorNonInput cell, colorFormula, colorInput
             End If
         ElseIf cell.Hyperlinks.Count > 0 Then
             ' Hyperlinks keep their own formatting
         ElseIf IsInput(cell, "") Then
-            cell.Font.Color = colorInput
+            AddCell inputCells, cell
         End If
     Next cell
 
+    ' Inputs last, so taking the format off a former input next to one can't
+    ' remove the border they share
+    If Not inputCells Is Nothing Then FormatInputs inputCells, colorInput
+
     Application.ScreenUpdating = True
 End Sub
+
+' ---------------------------------------------------------------------------
+' Input cell format: one of the fills and one of the borders below, chosen in
+' Settings > Auto-Color. Choice 0 keeps the cell's own fill or borders. Both
+' are saved by number, so add new choices at the end of each list.
+' ---------------------------------------------------------------------------
+
+Public Function InputFillName(ByVal fillIndex As Long) As String
+    InputFillName = Array("No fill (keep the cell's own)", "Light yellow", "Pale yellow", "Cream", _
+                          "Peach (Excel's Input style)", "Light orange", "Light blue", "Blue-grey", _
+                          "Light turquoise", "Light green", "Light grey")(fillIndex)
+End Function
+
+' The fill's RGB() colour, or NO_FILL
+Public Function InputFillColor(ByVal fillIndex As Long) As Long
+    InputFillColor = Array(NO_FILL, RGB(255, 255, 153), RGB(255, 242, 204), RGB(255, 255, 204), _
+                           RGB(255, 204, 153), RGB(252, 228, 214), RGB(221, 235, 247), RGB(231, 240, 243), _
+                           RGB(204, 255, 255), RGB(226, 239, 218), RGB(242, 242, 242))(fillIndex)
+End Function
+
+Public Function InputBorderName(ByVal borderIndex As Long) As String
+    InputBorderName = Array("No border (keep the cell's own)", "Thin light grey", "Thin grey", "Thin black", _
+                            "Dotted grey", "Dashed grey")(borderIndex)
+End Function
+
+' A border's line style (xlNone for choice 0), weight and colour
+Public Sub GetInputBorder(ByVal borderIndex As Long, edgeStyle As Long, edgeWeight As Long, edgeColor As Long)
+    edgeStyle = xlContinuous
+    edgeWeight = xlThin
+    Select Case borderIndex
+        Case 1: edgeColor = RGB(217, 217, 217)
+        Case 2: edgeColor = RGB(128, 128, 128)
+        Case 3: edgeColor = RGB(0, 0, 0)
+        Case 4: edgeColor = RGB(128, 128, 128): edgeWeight = xlHairline   ' Excel draws a hairline dotted
+        Case 5: edgeColor = RGB(128, 128, 128): edgeStyle = xlDash
+        Case Else: edgeStyle = xlNone
+    End Select
+End Sub
+
+Public Function SavedInputFill() As Long
+    SavedInputFill = SavedChoice("InputFill", DEFAULT_INPUT_FILL, INPUT_FILL_COUNT)
+End Function
+
+Public Function SavedInputBorder() As Long
+    SavedInputBorder = SavedChoice("InputBorder", DEFAULT_INPUT_BORDER, INPUT_BORDER_COUNT)
+End Function
+
+Public Sub SaveInputFormat(ByVal fillIndex As Long, ByVal borderIndex As Long)
+    SaveSetting "Breakdown", "AutoColor", "InputFill", CStr(fillIndex)
+    SaveSetting "Breakdown", "AutoColor", "InputBorder", CStr(borderIndex)
+End Sub
+
+' A saved choice from 0 to lastChoice, or defaultChoice
+Private Function SavedChoice(settingName As String, ByVal defaultChoice As Long, ByVal lastChoice As Long) As Long
+    Dim saved As String
+    saved = GetSetting("Breakdown", "AutoColor", settingName, "")
+    SavedChoice = defaultChoice
+    If saved Like "#" Or saved Like "##" Then
+        If CLng(saved) <= lastChoice Then SavedChoice = CLng(saved)
+    End If
+End Function
+
+' A picture of a cell with this fill and border, pixelsWide x pixelsHigh, for
+' the preview in Settings
+Public Function InputCellPicture(ByVal pixelsWide As Long, ByVal pixelsHigh As Long, _
+                                 ByVal fillIndex As Long, ByVal borderIndex As Long) As Object
+    Dim bytes() As Byte
+    Dim fillColor As Long
+    Dim edgeStyle As Long
+    Dim edgeWeight As Long
+    Dim edgeColor As Long
+    Dim pixelColor As Long
+    Dim x As Long
+    Dim y As Long
+
+    fillColor = InputFillColor(fillIndex)
+    If fillColor = NO_FILL Then fillColor = RGB(255, 255, 255)
+    GetInputBorder borderIndex, edgeStyle, edgeWeight, edgeColor
+    bytes = TraceUtils.NewBitmap(pixelsWide, pixelsHigh)
+    For y = 0 To pixelsHigh - 1
+        For x = 0 To pixelsWide - 1
+            If edgeStyle = xlNone Then
+                pixelColor = fillColor
+            ElseIf x < LINE_PIXELS Or y < LINE_PIXELS Or x >= pixelsWide - LINE_PIXELS Or y >= pixelsHigh - LINE_PIXELS Then
+                pixelColor = LinePixel(edgeStyle, edgeWeight, edgeColor, x, y)
+            Else
+                pixelColor = fillColor
+            End If
+            TraceUtils.SetPixel bytes, x, y, pixelColor
+        Next x
+    Next y
+    Set InputCellPicture = TraceUtils.BitmapPicture(bytes, "breakdown-cell-v3-" & fillIndex & "-" & borderIndex & "-" & _
+                                                    pixelsWide & "x" & pixelsHigh & ".bmp")
+End Function
+
+' One pixel (x, y) of a cell border. Excel draws dotted and dashed lines as
+' diagonal patterns of screen pixels (measured in Excel for Mac at 100% zoom):
+' a dotted hairline as a checkerboard, a dash as 3 pixels on and 1 off. The
+' gaps show the white sheet, not the cell's fill.
+Private Function LinePixel(ByVal edgeStyle As Long, ByVal edgeWeight As Long, ByVal edgeColor As Long, _
+                           ByVal x As Long, ByVal y As Long) As Long
+    Dim covered As Boolean
+    If edgeStyle = xlDash Then
+        covered = ((x + y) Mod 4 <> 1)
+    ElseIf edgeWeight = xlHairline Then
+        covered = ((x + y) Mod 2 = 0)
+    Else
+        covered = True
+    End If
+    If covered Then LinePixel = edgeColor Else LinePixel = RGB(255, 255, 255)
+End Function
+
+Private Sub AddCell(target As Range, cell As Range)
+    If target Is Nothing Then Set target = cell Else Set target = Union(target, cell)
+End Sub
+
+' The input colour, and the chosen fill and border around every cell
+Private Sub FormatInputs(inputCells As Range, fontColor As Long)
+    Dim fillColor As Long
+    Dim edgeStyle As Long
+    Dim edgeWeight As Long
+    Dim edgeColor As Long
+    Dim area As Range
+    fillColor = InputFillColor(SavedInputFill())
+    GetInputBorder SavedInputBorder(), edgeStyle, edgeWeight, edgeColor
+    For Each area In inputCells.Areas
+        area.Font.Color = fontColor
+        If fillColor <> NO_FILL Then
+            area.Interior.Pattern = xlSolid
+            area.Interior.Color = fillColor
+        End If
+        If edgeStyle <> xlNone Then
+            With area.Borders
+                .LineStyle = edgeStyle
+                .Weight = edgeWeight
+                .Color = edgeColor
+            End With
+        End If
+    Next area
+End Sub
+
+' A cell that is not an input: its colour. A cell still in the input colour
+' was an input before, and loses its input format too.
+Private Sub ColorNonInput(cell As Range, fontColor As Long, inputColor As Long)
+    If cell.Font.Color = inputColor And fontColor <> inputColor Then ClearInputFormat cell, inputColor
+    cell.Font.Color = fontColor
+End Sub
+
+' Takes the input format off a former input: a fill from the list, and every
+' border in one of the listed styles, except one shared with a neighbour
+' still in the input colour. Other fills and borders stay.
+Private Sub ClearInputFormat(cell As Range, inputColor As Long)
+    Dim fillIndex As Long
+    Dim edge As Variant
+    If cell.Interior.Pattern = xlSolid Then
+        For fillIndex = 1 To INPUT_FILL_COUNT
+            If cell.Interior.Color = InputFillColor(fillIndex) Then
+                cell.Interior.Pattern = xlNone
+                Exit For
+            End If
+        Next fillIndex
+    End If
+    For Each edge In Array(xlEdgeLeft, xlEdgeTop, xlEdgeBottom, xlEdgeRight)
+        If IsInputBorder(cell.Borders(edge)) Then
+            If Not NeighbourInColor(cell, CLng(edge), inputColor) Then cell.Borders(edge).LineStyle = xlNone
+        End If
+    Next edge
+End Sub
+
+' True if a cell border has one of the listed styles
+Private Function IsInputBorder(cellBorder As Border) As Boolean
+    Dim borderIndex As Long
+    Dim edgeStyle As Long
+    Dim edgeWeight As Long
+    Dim edgeColor As Long
+    If cellBorder.LineStyle = xlNone Then Exit Function
+    For borderIndex = 1 To INPUT_BORDER_COUNT
+        GetInputBorder borderIndex, edgeStyle, edgeWeight, edgeColor
+        If cellBorder.LineStyle = edgeStyle And cellBorder.Weight = edgeWeight And cellBorder.Color = edgeColor Then
+            IsInputBorder = True
+            Exit Function
+        End If
+    Next borderIndex
+End Function
+
+' True if the cell across the given edge has text in the colour fontColor
+Private Function NeighbourInColor(cell As Range, edge As Long, fontColor As Long) As Boolean
+    Dim rowStep As Long
+    Dim columnStep As Long
+    Dim neighbour As Range
+    Select Case edge
+        Case xlEdgeLeft: columnStep = -1
+        Case xlEdgeTop: rowStep = -1
+        Case xlEdgeBottom: rowStep = 1
+        Case xlEdgeRight: columnStep = 1
+    End Select
+
+    On Error Resume Next    ' No neighbour past the edge of the sheet
+    Set neighbour = cell.Offset(rowStep, columnStep)
+    On Error GoTo 0
+    If neighbour Is Nothing Then Exit Function
+    If neighbour.Font.Color = fontColor Then NeighbourInColor = True
+End Function
 
 ' Any error value except #N/A, which models often produce on purpose with NA()
 Private Function IsErrorValue(cell As Range) As Boolean
