@@ -6,13 +6,23 @@ Public Const NO_BORDER As Long = -1
 ' Corner pictures made this session, keyed by size, colours and corner
 Private CornerPictures As Collection
 
-' Notes after the address in a trace row (see GetReferencesRecursive):
+' Notes after the address in a trace row (see ListReferences):
 ' "(from range X)" for a cell listed under a range it belongs to, "(ref N)"
 ' for the Nth reference in the parent's formula, and "(again)" for a cell
 ' whose own precedents are listed under an earlier row
 Private Const ROW_FROM_RANGE As String = " (from range "
 Private Const ROW_REF As String = " (ref "
 Private Const ROW_AGAIN As String = " (again)"
+
+' The trace being built (see FillTraceList): its rows in order, the most
+' arrows followed from one cell, and where the trace started
+Private TraceRows() As String
+Private TraceRowCount As Long
+Private TraceSafetyLimit As Long
+Private HomeSheet As Worksheet
+Private HomeSelection As Range
+Private HomeNames As Collection         ' Names defined in the workbook the trace started in
+Private ClearedSheets As Collection     ' Sheets whose tracer arrows the trace has cleared
 
 ' history: the trace windows to return to with Shift+Enter; omitted from
 ' the ribbon, which starts a fresh one.
@@ -64,55 +74,119 @@ End Function
 ' row per traced cell: the indented "  L1: [Book]Sheet!$A$1" line, its value
 ' and its formula. The window turns these rows into its tree.
 Private Sub FillTraceList(lst As MSForms.ListBox, root As Range, blnPrecedents As Boolean)
-    lst.Clear
-    lst.ColumnCount = 3
-    AddTraceRow lst, root.Worksheet.Name & "!" & root.address, root
+    Dim rootRow As Variant
+    rootRow = TraceRow(root.Worksheet.Name & "!" & root.address, root)
 
     Dim processedCells As New Collection
     Dim maxDepth As Integer
     maxDepth = Val(GetSetting("Breakdown", "FormulaTracing", "MaxDepth", "10"))
+    TraceSafetyLimit = Val(GetSetting("Breakdown", "FormulaTracing", "SafetyLimit", "100"))
 
-    Dim traceLines() As String
+    ' Finding references moves around the workbook. Do it without running the
+    ' workbook's own event macros, then go back to the selection the trace
+    ' started from, also if it fails.
+    Dim eventsWereOn As Boolean
+    Dim failNumber As Long
+    Dim failSource As String
+    Dim failDescription As String
+    Set HomeSheet = ActiveSheet
+    Set HomeSelection = Selection
+    Set HomeNames = DefinedNames(HomeSheet.Parent)
+    Set ClearedSheets = New Collection
+    TraceRowCount = 0
+    ReDim TraceRows(1 To 64)
+    eventsWereOn = Application.EnableEvents
+    Application.EnableEvents = False
+    On Error GoTo Failed
+    ListReferences root, blnPrecedents, 1, maxDepth, processedCells
+    On Error GoTo 0
+    EndTrace eventsWereOn
+
+    ' The list box takes all rows at once: added one by one, they take a
+    ' quarter of a millisecond each
+    Dim listRows() As Variant
+    Dim listRow As Variant
     Dim colonPos As Long
     Dim traced As Range
     Dim i As Long
-    traceLines = Split(GetReferencesRecursive(root, blnPrecedents, 1, maxDepth, processedCells), vbCr)
-    For i = 0 To UBound(traceLines)
-        colonPos = InStr(traceLines(i), ": ")
+    Dim j As Long
+    Dim n As Long
+    ReDim listRows(0 To TraceRowCount, 0 To 2)
+    For j = 0 To 2
+        listRows(0, j) = rootRow(j)
+    Next j
+    For i = 1 To TraceRowCount
+        colonPos = InStr(TraceRows(i), ": ")
         If colonPos > 0 Then
             Set traced = Nothing
             On Error Resume Next
-            Set traced = Range(TraceRowAddress(Mid$(traceLines(i), colonPos + 2)))
+            Set traced = Range(TraceRowAddress(Mid$(TraceRows(i), colonPos + 2)))
             On Error GoTo 0
-            AddTraceRow lst, traceLines(i), traced
+            listRow = TraceRow(TraceRows(i), traced)
+            n = n + 1
+            For j = 0 To 2
+                listRows(n, j) = listRow(j)
+            Next j
         End If
     Next i
+    Erase TraceRows
 
-    If lst.ListCount > 0 Then lst.ListIndex = 0
+    lst.Clear
+    lst.ColumnCount = 3
+    lst.List = listRows
+    lst.ListIndex = 0
+    Exit Sub
+
+Failed:
+    failNumber = Err.Number
+    failSource = Err.Source
+    failDescription = Err.Description
+    EndTrace eventsWereOn
+    Erase TraceRows
+    Err.Raise failNumber, failSource, failDescription
 End Sub
 
-Private Sub AddTraceRow(lst As MSForms.ListBox, rowText As String, cell As Range)
-    lst.AddItem
-    lst.List(lst.ListCount - 1, 0) = rowText
+' Go back to where the trace started, and run event macros again if they
+' ran before
+Private Sub EndTrace(ByVal eventsWereOn As Boolean)
+    On Error Resume Next
+    HomeSheet.Activate
+    HomeSelection.Select
+    Application.EnableEvents = eventsWereOn
+    Set HomeSheet = Nothing
+    Set HomeSelection = Nothing
+    Set HomeNames = Nothing
+    Set ClearedSheets = Nothing
+End Sub
+
+' Add a row to the trace being built
+Private Sub AddTraceLine(rowText As String)
+    TraceRowCount = TraceRowCount + 1
+    If TraceRowCount > UBound(TraceRows) Then ReDim Preserve TraceRows(1 To 2 * UBound(TraceRows))
+    TraceRows(TraceRowCount) = rowText
+End Sub
+
+' One row of the list box: Array(row text, value, formula)
+Private Function TraceRow(rowText As String, cell As Range) As Variant
     If cell Is Nothing Then
-        lst.List(lst.ListCount - 1, 1) = "#N/A"
-        lst.List(lst.ListCount - 1, 2) = "#N/A"
+        TraceRow = Array(rowText, "#N/A", "#N/A")
+    ElseIf cell.Cells.Count = 1 Then
+        TraceRow = Array(rowText, GetCellValueAsString(cell), CStr(cell.formula))
     Else
-        lst.List(lst.ListCount - 1, 1) = GetCellValueAsString(cell)
         ' A range such as F3:F9 has no single formula (.Formula is an array)
-        If cell.Cells.Count = 1 Then
-            lst.List(lst.ListCount - 1, 2) = cell.formula
-        Else
-            lst.List(lst.ListCount - 1, 2) = ""
-        End If
+        TraceRow = Array(rowText, GetCellValueAsString(cell), "")
     End If
-End Sub
+End Function
 
 Public Function GetCellValueAsString(cell As Range) As String
+    Dim cellValue As Variant
     On Error Resume Next
-    If IsError(cell.value) Then
+    cellValue = cell.value
+    If Err.Number <> 0 Then
+        GetCellValueAsString = "#ERROR"     ' The value can't be read
+    ElseIf IsError(cellValue) Then
         GetCellValueAsString = "#ERROR"
-    ElseIf IsEmpty(cell.value) Then
+    ElseIf IsEmpty(cellValue) Then
         GetCellValueAsString = ""
     Else
         ' Show the value as the cell displays it; fall back to the raw value
@@ -120,7 +194,7 @@ Public Function GetCellValueAsString(cell As Range) As String
         Dim shownText As String
         shownText = Trim(cell.text)
         If Len(Replace(shownText, "#", "")) = 0 Then
-            GetCellValueAsString = CStr(cell.value)
+            GetCellValueAsString = CStr(cellValue)
         Else
             GetCellValueAsString = shownText
         End If
@@ -129,26 +203,28 @@ Public Function GetCellValueAsString(cell As Range) As String
 End Function
 
 
-Private Function GetReferencesRecursive(aCell As Range, blnPrecedents As Boolean, currentLevel As Integer, maxLevel As Integer, processedCells As Collection) As String
-    If currentLevel > maxLevel Then Exit Function
+' Add the rows for aCell's references (or the cells referring to it) to the
+' trace, each followed by the rows for its own, depth first
+Private Sub ListReferences(aCell As Range, blnPrecedents As Boolean, currentLevel As Integer, maxLevel As Integer, processedCells As Collection)
+    If currentLevel > maxLevel Then Exit Sub
 
     ' Each cell is traced once; this also stops circular references
     Dim cellKey As String
     cellKey = aCell.address(External:=True)
-    If AlreadyTraced(processedCells, cellKey) Then Exit Function
+    If HasKey(processedCells, cellKey) Then Exit Sub
     processedCells.Add cellKey, cellKey
-
-    Dim originalSelection As Range
-    Set originalSelection = Selection
 
     ' Turn the direct references into ranges, without duplicates
     Dim precedentsList As New Collection
     Dim precedentAddresses() As String
+    Dim listedAddresses() As String
     Dim precedentCell As Range
+    Dim precedentAddress As String
     Dim isDuplicate As Boolean
     Dim i As Long
     Dim j As Long
     precedentAddresses = Split(GetDirectReferences(aCell, blnPrecedents), vbCr)
+    ReDim listedAddresses(0 To UBound(precedentAddresses) + 1)
     For i = 0 To UBound(precedentAddresses)
         If Len(Trim(precedentAddresses(i))) > 0 Then
             Set precedentCell = Nothing
@@ -157,19 +233,21 @@ Private Function GetReferencesRecursive(aCell As Range, blnPrecedents As Boolean
             On Error GoTo 0
 
             If Not precedentCell Is Nothing Then
+                precedentAddress = precedentCell.address(External:=True)
                 isDuplicate = False
                 For j = 1 To precedentsList.Count
-                    If precedentsList(j).address(External:=True) = precedentCell.address(External:=True) Then
+                    If listedAddresses(j) = precedentAddress Then
                         isDuplicate = True
                         Exit For
                     End If
                 Next j
-                If Not isDuplicate Then precedentsList.Add precedentCell
+                If Not isDuplicate Then
+                    precedentsList.Add precedentCell
+                    listedAddresses(precedentsList.Count) = precedentAddress
+                End If
             End If
         End If
     Next i
-
-    originalSelection.Select
 
     ' The rows to list: for a formula's precedents, one per reference in the
     ' order they are written, so a cell used twice is listed twice; otherwise
@@ -185,135 +263,124 @@ Private Function GetReferencesRecursive(aCell As Range, blnPrecedents As Boolean
         Next i
     End If
 
-    ' List each row and recurse into its cell straight away, so its own
-    ' precedents are indented under it. A cell listed before, in this formula
-    ' or elsewhere in the tree, is marked "(again)" and not traced again: its
-    ' precedents are under its first row. (Dependents listed before are left
+    ' List each row and trace its cell straight away, so its own references
+    ' are indented under it. A cell listed before, in this formula or
+    ' elsewhere in the tree, is marked "(again)" and not traced again: its
+    ' references are under its first row. (Dependents listed before are left
     ' out instead.)
-    Dim allResults As String
     Dim rowStart As String
     Dim note As String
     Dim refRow As Variant
     Dim listed() As Boolean
     Dim precedent As Range
     Dim cell As Range
+    Dim cellAddress As String
     ReDim listed(0 To precedentsList.Count)
     rowStart = String(currentLevel * 2, " ") & "L" & currentLevel & ": "
     For Each refRow In refRows
         Set precedent = precedentsList(refRow(0))
+        precedentAddress = listedAddresses(refRow(0))
         If refRow(1) > 0 Then note = ROW_REF & refRow(1) & ")" Else note = ""
         If listed(refRow(0)) Then
-            allResults = allResults & rowStart & precedent.address(External:=True) & note & ROW_AGAIN & vbCr
+            AddTraceLine rowStart & precedentAddress & note & ROW_AGAIN
         ElseIf precedent.Cells.Count > 1 Then
             ' A range: list it, then each of its cells one level deeper
-            allResults = allResults & rowStart & precedent.address(External:=True) & note & vbCr
+            AddTraceLine rowStart & precedentAddress & note
             For Each cell In precedent.Cells
-                If Not AlreadyTraced(processedCells, cell.address(External:=True)) Then
-                    allResults = allResults & String((currentLevel + 1) * 2, " ") & "L" & (currentLevel + 1) & ": " & cell.address(External:=True) & ROW_FROM_RANGE & precedent.address(External:=True) & ")" & vbCr
-                    allResults = allResults & GetReferencesRecursive(cell, blnPrecedents, currentLevel + 2, maxLevel, processedCells)
+                cellAddress = cell.address(External:=True)
+                If Not HasKey(processedCells, cellAddress) Then
+                    AddTraceLine String((currentLevel + 1) * 2, " ") & "L" & (currentLevel + 1) & ": " & cellAddress & ROW_FROM_RANGE & precedentAddress & ")"
+                    ListReferences cell, blnPrecedents, currentLevel + 2, maxLevel, processedCells
                 End If
             Next cell
-        ElseIf Not AlreadyTraced(processedCells, precedent.address(External:=True)) Then
-            allResults = allResults & rowStart & precedent.address(External:=True) & note & vbCr
-            allResults = allResults & GetReferencesRecursive(precedent, blnPrecedents, currentLevel + 1, maxLevel, processedCells)
+        ElseIf Not HasKey(processedCells, precedentAddress) Then
+            AddTraceLine rowStart & precedentAddress & note
+            ListReferences precedent, blnPrecedents, currentLevel + 1, maxLevel, processedCells
         ElseIf blnPrecedents Then
-            allResults = allResults & rowStart & precedent.address(External:=True) & note & ROW_AGAIN & vbCr
+            AddTraceLine rowStart & precedentAddress & note & ROW_AGAIN
         End If
         listed(refRow(0)) = True
     Next refRow
+End Sub
 
-    GetReferencesRecursive = allResults
-End Function
-
-' True if the cell has already been traced, i.e. it is shown elsewhere in the tree
-Private Function AlreadyTraced(processedCells As Collection, cellKey As String) As Boolean
+' True if the collection has an item with this key (for the traced cells:
+' the cell is shown elsewhere in the tree)
+Private Function HasKey(items As Collection, key As String) As Boolean
     On Error Resume Next
-    Dim probe As String
-    probe = processedCells(cellKey)
-    AlreadyTraced = (Err.Number = 0)
+    Dim probe As Variant
+    probe = items(key)
+    HasKey = (Err.Number = 0)
     On Error GoTo 0
 End Function
 
-' Helper function to safely get direct precedents without navigation issues
+' The names defined in a workbook, keyed by name without any sheet prefix
+Private Function DefinedNames(book As Workbook) As Collection
+    Dim definedName As Variant
+    Set DefinedNames = New Collection
+    On Error Resume Next
+    For Each definedName In book.Names
+        DefinedNames.Add True, Mid$(definedName.Name, InStrRev(definedName.Name, "!") + 1)
+    Next definedName
+End Function
+
+' The cells aCell refers to (blnPrecedents) or that refer to it, one address
+' per line, found by following Excel's tracer arrows from the cell
 Private Function GetDirectReferences(aCell As Range, blnPrecedents As Boolean) As String
-    
-    ' Early exit for dependents if cell is unlikely to have dependents
-    If Not blnPrecedents Then
-        ' For dependents: only proceed if cell has a non-empty value
-        If IsEmpty(aCell.Value) Then
-            GetDirectReferences = ""
+    ' Only a formula has precedents (the arrows give a merged cell its own
+    ' merged area), and only a cell with a value dependents. Most formulas'
+    ' precedents can be read from the formula itself.
+    Dim parsed As String
+    If blnPrecedents Then
+        If Not aCell.HasFormula And Not aCell.MergeCells Then Exit Function
+        If FormulaPrecedents(aCell, parsed) Then
+            GetDirectReferences = parsed
             Exit Function
         End If
-    End If
-    
-    Dim originalSelection As Range
-    Dim originalSheet As Worksheet
-    Set originalSelection = Selection
-    Set originalSheet = ActiveSheet
-    
-    ' Safely select the target cell (handle cross-sheet references)
-    On Error Resume Next
-    aCell.Parent.Activate  ' Activate the worksheet first
-    Dim activateError As Long
-    activateError = Err.Number
-    
-    If activateError <> 0 Then
-        ' If we can't activate the sheet, return empty result
-        On Error GoTo 0
-        GetDirectReferences = ""
+    ElseIf IsEmpty(aCell.Value) Then
         Exit Function
-    End If
-    
-    aCell.Select  ' Now select the cell
-    Dim selectError As Long
-    selectError = Err.Number
-    
-    If selectError <> 0 Then
-        ' If we can't select the cell, return empty result
-        On Error GoTo 0
-        originalSheet.Activate
-        originalSelection.Select
-        GetDirectReferences = ""
-        Exit Function
-    End If
-    On Error GoTo 0
-    
-    Dim i As Long
-    Dim results As String
-    Dim safetyLimit As Long
-    safetyLimit = Val(GetSetting("Breakdown", "FormulaTracing", "SafetyLimit", "100"))
-    
-    aCell.Parent.ClearArrows
-    
-    ' Check if cell has references before calling Show methods to avoid beep
-    If blnPrecedents Then
-        ' For precedents: only call if cell has a formula
-        If aCell.HasFormula Then
-            aCell.ShowPrecedents
-        End If
-    Else
-        ' For dependents: only proceed if cell has a value that could be referenced
-        ' Similar to HasFormula check for precedents
-        If Not IsEmpty(aCell.Value) Then
-            ' Cell has a value, so it might have dependents - call ShowDependents to create arrows
-            aCell.ShowDependents
-        End If
     End If
 
-    ' Collect direct precedents/dependents with better error handling
+    ' Select the cell, going there from the workbook the trace started in.
+    ' The trace goes back to its starting selection when it ends.
+    On Error Resume Next
+    If ActiveWorkbook.Name <> HomeSheet.Parent.Name Then HomeSheet.Activate
+    If ActiveSheet.Name <> aCell.Parent.Name Or ActiveWorkbook.Name <> aCell.Parent.Parent.Name Then aCell.Parent.Activate
+    If Err.Number <> 0 Then Exit Function
+    aCell.Select
+    If Err.Number <> 0 Then Exit Function
+    On Error GoTo 0
+
+    Dim i As Long
+    Dim results As String
+    Dim navResult As Range
+    Dim navError As Long
+    Dim sheetKey As String
+
+    ' Follow only this cell's arrows: clear any the sheet had when the trace
+    ' first came to it, and this cell's once followed
+    sheetKey = aCell.Parent.Parent.Name & "|" & aCell.Parent.Name
+    If Not HasKey(ClearedSheets, sheetKey) Then
+        aCell.Parent.ClearArrows
+        ClearedSheets.Add True, sheetKey
+    End If
+    ' (Showing precedents of a cell without a formula would beep)
+    If Not blnPrecedents Then
+        aCell.ShowDependents
+    ElseIf aCell.HasFormula Then
+        aCell.ShowPrecedents
+    End If
+
+    ' Direct precedents/dependents on the same sheet
     i = 0
     Do
         i = i + 1
-        
+
         On Error Resume Next
-        Dim navResult As Range
         Set navResult = aCell.NavigateArrow(blnPrecedents, 1, i)
-        Dim navError As Long
         navError = Err.Number
-        
+
         ' Check if navigation was successful and we didn't return to original cell
         If navError = 0 And Not navResult Is Nothing Then
-            
             If navResult.address(External:=True) <> aCell.address(External:=True) Then
                 results = results & navResult.address(External:=True) & vbCr
             Else
@@ -323,26 +390,21 @@ Private Function GetDirectReferences(aCell As Range, blnPrecedents As Boolean) A
             Exit Do
         End If
         On Error GoTo 0
-        
+
         ' Safety check to prevent infinite loops
-        If i > safetyLimit Then
-            Exit Do
-        End If
-        
+        If i > TraceSafetyLimit Then Exit Do
     Loop
 
-    ' Collect precedents from other sheets/workbooks
+    ' Those on other sheets and in other workbooks
     i = 1
     Do
         i = i + 1
-        
+
         On Error Resume Next
         Set navResult = aCell.NavigateArrow(blnPrecedents, i, 1)
-        Dim crossNavError As Long
-        crossNavError = Err.Number
-        
-        If crossNavError = 0 And Not navResult Is Nothing Then
-            
+        navError = Err.Number
+
+        If navError = 0 And Not navResult Is Nothing Then
             If navResult.address(External:=True) <> aCell.address(External:=True) Then
                 results = results & navResult.address(External:=True) & vbCr
             Else
@@ -352,21 +414,117 @@ Private Function GetDirectReferences(aCell As Range, blnPrecedents As Boolean) A
             Exit Do
         End If
         On Error GoTo 0
-        
-        ' Safety check
-        If i > safetyLimit Then
-            Exit Do
-        End If
-        
+
+        If i > TraceSafetyLimit Then Exit Do
     Loop
 
     aCell.Parent.ClearArrows
-    
-    ' Restore original worksheet and selection
-    originalSheet.Activate
-    originalSelection.Select
-    
     GetDirectReferences = results
+End Function
+
+' A formula cell's precedents read from the formula itself, joined with vbCr
+' like GetDirectReferences, when that is certain to give the cells Excel's
+' tracer arrows give (following arrows takes milliseconds a cell). It is when
+' the cell is not merged, and the formula only refers to cells with plain A1
+' references to visible, unprotected sheets of the workbook the trace
+' started in, none of them the cell itself or merged cells, and only calls
+' built-in functions: no names, tables, spills, whole rows or columns, other
+' workbooks, 3D references, intersections or LET variables. For such a
+' formula the arrows give each cell or range it refers to, once. False
+' otherwise.
+Private Function FormulaPrecedents(aCell As Range, results As String) As Boolean
+    Dim formulaText As String
+    Dim spans As Collection
+    Dim span As Variant
+    Dim target As Range
+    Dim targetAddress As String
+    Dim cellAddress As String
+    Dim found As New Collection
+    Dim sameSheetCount As Long
+    Dim otherSheetCount As Long
+
+    If aCell.Worksheet.Parent.Name <> HomeSheet.Parent.Name Then Exit Function
+    If Not ArrowsWork(aCell.Worksheet) Then Exit Function
+    If aCell.HasArray Or aCell.MergeCells Then Exit Function
+    formulaText = aCell.formula
+    If Left$(formulaText, 1) <> "=" Then Exit Function
+    Set spans = ReferenceSpans(formulaText)
+    If Not OnlyBuiltInsAndOperators(formulaText, spans) Then Exit Function
+
+    cellAddress = aCell.address(External:=True)
+    For Each span In spans
+        If Left$(span(2), 1) = "[" Then Exit Function
+        Set target = SpanRange(CStr(span(2)), CStr(span(3)), aCell.Worksheet)
+        If target Is Nothing Then Exit Function
+        ' Off the cell's sheet, every reference is a link of one arrow
+        If target.Worksheet.Name <> aCell.Worksheet.Name Then
+            If Not ArrowsWork(target.Worksheet) Then Exit Function
+            otherSheetCount = otherSheetCount + 1
+        End If
+        ' The arrow to a merged cell gives its whole merged area
+        If IsNull(target.MergeCells) Then Exit Function
+        If target.MergeCells Then Exit Function
+        targetAddress = target.address(External:=True)
+        If targetAddress = cellAddress Then Exit Function
+        If Not HasKey(found, targetAddress) Then
+            found.Add targetAddress, targetAddress
+            If target.Worksheet.Name = aCell.Worksheet.Name Then sameSheetCount = sameSheetCount + 1
+            results = results & targetAddress & vbCr
+        End If
+    Next span
+
+    ' No more than GetDirectReferences follows
+    If sameSheetCount >= TraceSafetyLimit Or otherSheetCount >= TraceSafetyLimit Then Exit Function
+    FormulaPrecedents = True
+End Function
+
+' True for a sheet where Excel can show and follow tracer arrows
+Private Function ArrowsWork(ws As Worksheet) As Boolean
+    ArrowsWork = (ws.Visible = xlSheetVisible And Not ws.ProtectContents)
+End Function
+
+' True if formulaText, apart from string literals and the references in
+' spans, holds only calls of built-in functions, TRUE and FALSE, numbers and
+' operators. A name could stand for cells and a space could be an
+' intersection, so either gives False.
+Private Function OnlyBuiltInsAndOperators(formulaText As String, spans As Collection) As Boolean
+    Dim i As Long
+    Dim j As Long
+    Dim spanIndex As Long
+    Dim nextSpan As Long
+    Dim ch As String
+    Dim word As String
+
+    spanIndex = 1
+    i = 1
+    Do While i <= Len(formulaText)
+        If spanIndex <= spans.Count Then nextSpan = spans(spanIndex)(0) Else nextSpan = 0
+        ch = Mid$(formulaText, i, 1)
+        If i = nextSpan Then
+            i = i + spans(spanIndex)(1)
+            spanIndex = spanIndex + 1
+        ElseIf ch = """" Then
+            i = SkipStringLiteral(formulaText, i)
+        ElseIf ch Like "[A-Za-z_]" Then
+            ' A function name, or TRUE or FALSE
+            j = i
+            Do While Mid$(formulaText, j, 1) Like "[A-Za-z0-9_.]"
+                j = j + 1
+            Loop
+            word = Mid$(formulaText, i, j - i)
+            If Mid$(formulaText, j, 1) = "(" Then
+                If HasKey(HomeNames, word) Then Exit Function   ' A LAMBDA name, say
+            ElseIf UCase$(word) <> "TRUE" And UCase$(word) <> "FALSE" Then
+                Exit Function
+            End If
+            i = j
+        ElseIf InStr(1, "0123456789.+-*/^&=<>(),;%{}", ch) > 0 Then
+            i = i + 1
+        Else
+            Exit Function
+        End If
+    Loop
+    OnlyBuiltInsAndOperators = True
 End Function
 
 ' One entry per reference in formulaCell's formula, in the order written:

@@ -70,3 +70,9 @@ cd src/forms
 sed 's/Precedents/Dependents/g;s/precedents/dependents/g;s/Precedent/Dependent/g;s/precedent/dependent/g' frmPrecedents.frm \
   | sed 's/^Private Const FORMULA_FROM_ANCESTOR As Boolean = True$/Private Const FORMULA_FROM_ANCESTOR As Boolean = False/' > frmDependents.frm
 ```
+
+Trace speed: following Excel's tracer arrows costs milliseconds per cell, so
+`FormulaPrecedents` in `TraceUtils.bas` reads a formula's precedents from the
+formula itself whenever that is certain to give what the arrows give, and
+sends everything else (names, merged cells, hidden sheets, intersections, ...)
+through the arrows. Any change to either path must keep traces identical.

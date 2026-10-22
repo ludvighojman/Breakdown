@@ -1118,9 +1118,10 @@ End Sub
 
 ' Add a tree node
 Private Sub AddTreeNode(nodeText As String, level As Integer, expanded As Boolean, hasChildren As Boolean, originalData As String)
-    ' Expand array if needed
+    ' Expand array if needed, doubling it so that a large tree is not copied
+    ' over and over
     If TreeCount >= UBound(TreeData) Then
-        ReDim Preserve TreeData(1 To UBound(TreeData) + 50)
+        ReDim Preserve TreeData(1 To 2 * UBound(TreeData))
     End If
 
     TreeCount = TreeCount + 1
