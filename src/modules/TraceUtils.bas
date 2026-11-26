@@ -3,6 +3,10 @@ Option Explicit
 ' Border colour of a rounded box that has none (see CornerPicture)
 Public Const NO_BORDER As Long = -1
 
+' Default of Settings > Formula Tracing > Second-level precedent tracing
+' threshold (see SecondLevelThreshold)
+Public Const DEFAULT_SECOND_LEVEL_THRESHOLD As Long = 50
+
 ' Corner pictures made this session, keyed by size, colours and corner
 Private CornerPictures As Collection
 
@@ -14,51 +18,98 @@ Private Const ROW_FROM_RANGE As String = " (from range "
 Private Const ROW_REF As String = " (ref "
 Private Const ROW_AGAIN As String = " (again)"
 
-' The trace being built (see FillTraceList): its rows in order, the most
-' arrows followed from one cell, and where the trace started
+' The budget of one trace, so that a cell with a huge dependency network
+' can't run Excel out of memory or keep it busy indefinitely: at most
+' MAX_TRACE_ROWS rows, and no cell traced after MAX_TRACE_SECONDS. Past the
+' budget the traced cell's own references are still listed, untraced, so the
+' first level stays whole (see ListReferences).
+Private Const MAX_TRACE_ROWS As Long = 10000
+Private Const MAX_TRACE_SECONDS As Single = 30
+' A range of more cells than this shows no value in its row: reading it
+' would copy the value of every cell
+Private Const MAX_RANGE_VALUE_CELLS As Long = 10000
+' Rows between progress updates in the status bar during a long trace
+Private Const PROGRESS_ROWS As Long = 250
+
+' The trace being built (see BuildTrace): its rows in order and the cell or
+' range each stands for, the most arrows followed from one cell, and where
+' the trace started
 Private TraceRows() As String
+Private TraceCells() As Range
 Private TraceRowCount As Long
 Private TraceSafetyLimit As Long
 Private HomeSheet As Worksheet
 Private HomeSelection As Range
 Private HomeNames As Collection         ' Names defined in the workbook the trace started in
 Private ClearedSheets As Collection     ' Sheets whose tracer arrows the trace has cleared
+Private EventsBefore As Boolean         ' Application.EnableEvents when the trace started
+Private TraceStart As Single            ' Timer when the trace started
+Private TraceStopped As String          ' "rows" or "time" once the budget is spent, else ""
+Private TraceNoun As String             ' "precedents" or "dependents", for the status bar
+Private ShowedProgress As Boolean       ' The status bar shows the trace's progress
+Private StatusBefore As Variant         ' ... and showed this before it
 
-' history: the trace windows to return to with Shift+Enter; omitted from
-' the ribbon, which starts a fresh one.
-Public Sub ShowTracePrecedents(Optional history As Collection)
+' Open a trace window on the selected cell. history: the trace windows to
+' return to with Shift+Enter; omitted from the ribbon, which starts a fresh
+' one. False if no window opened: nothing selected, or the user cancelled at
+' the warning for a cell with many direct precedents.
+Public Function ShowTracePrecedents(Optional history As Collection) As Boolean
     Dim root As Range
-    If Not GetTraceRoot(root) Then Exit Sub
+    Dim listRows As Variant
+    Dim notice As Variant
+    If Not GetTraceRoot(root) Then Exit Function
+    If Not BuildTrace(root, True, listRows, notice) Then Exit Function
 
-    ' Building the trace selects cells and draws arrows for every node; don't
-    ' repaint the sheet for each step. Excel turns this back on when the macro ends.
+    ' Excel turns screen updating back on when the macro ends
     Application.ScreenUpdating = False
-
     Dim frm As New frmPrecedents
     frm.SetRoot root
-    FillTraceList frm.lstPrecedents, root, True
-    frm.ConvertToTreeView
+    frm.SetNotice notice(0), notice(1), notice(2)
+    frm.ConvertToTreeView listRows
     frm.SetHistory history
     Application.ScreenUpdating = True
     frm.ShowAtDefaultPosition
-End Sub
+    ShowTracePrecedents = True
+End Function
 
-' history: the trace windows to return to with Shift+Enter; omitted from
-' the ribbon, which starts a fresh one.
-Public Sub ShowTraceDependents(Optional history As Collection)
+' As ShowTracePrecedents, for the cells that refer to the selected cell
+Public Function ShowTraceDependents(Optional history As Collection) As Boolean
     Dim root As Range
-    If Not GetTraceRoot(root) Then Exit Sub
+    Dim listRows As Variant
+    Dim notice As Variant
+    If Not GetTraceRoot(root) Then Exit Function
+    If Not BuildTrace(root, False, listRows, notice) Then Exit Function
 
     Application.ScreenUpdating = False
-
     Dim frm As New frmDependents
     frm.SetRoot root
-    FillTraceList frm.lstDependents, root, False
-    frm.ConvertToTreeView
+    frm.SetNotice notice(0), notice(1), notice(2)
+    frm.ConvertToTreeView listRows
     frm.SetHistory history
     Application.ScreenUpdating = True
     frm.ShowAtDefaultPosition
-End Sub
+    ShowTraceDependents = True
+End Function
+
+' The most direct precedents a cell can have for its trace to go past the
+' first level (Settings > Formula Tracing). The default when nothing valid is
+' saved, so existing users get it without setting anything.
+Public Function SecondLevelThreshold() As Long
+    Dim saved As String
+    saved = Trim$(GetSetting("Breakdown", "FormulaTracing", "SecondLevelThreshold", CStr(DEFAULT_SECOND_LEVEL_THRESHOLD)))
+    If IsPositiveWholeNumber(saved) Then
+        SecondLevelThreshold = CLng(saved)
+    Else
+        SecondLevelThreshold = DEFAULT_SECOND_LEVEL_THRESHOLD
+    End If
+End Function
+
+' True for digits only, from 1 to 999,999,999 (so it fits a Long)
+Public Function IsPositiveWholeNumber(ByVal numberText As String) As Boolean
+    If Len(numberText) = 0 Or Len(numberText) > 9 Then Exit Function
+    If numberText Like "*[!0-9]*" Then Exit Function
+    IsPositiveWholeNumber = (CLng(numberText) >= 1)
+End Function
 
 ' The cell to trace: the first cell of the selection
 Private Function GetTraceRoot(root As Range) As Boolean
@@ -70,111 +121,254 @@ Private Function GetTraceRoot(root As Range) As Boolean
     GetTraceRoot = True
 End Function
 
-' Fill the trace window's designer list box with the traced cell and then one
-' row per traced cell: the indented "  L1: [Book]Sheet!$A$1" line, its value
-' and its formula. The window turns these rows into its tree.
-Private Sub FillTraceList(lst As MSForms.ListBox, root As Range, blnPrecedents As Boolean)
-    Dim rootRow As Variant
-    rootRow = TraceRow(root.Worksheet.Name & "!" & root.address, root)
-
+' Trace root's precedents (blnPrecedents) or dependents into the rows of a
+' trace window: listRows(0 To n, 0 To 2) holds the traced cell and then one
+' row per traced cell, each the indented "  L1: [Book]Sheet!$A$1" line, its
+' value and its formula. The window turns these rows into its tree.
+'
+' Before anything is traced past the cell itself, its direct precedents are
+' counted. More than the threshold in Settings asks the user first, and if
+' they go ahead only the first level is traced: its cells' own precedents
+' are never looked up. notice: Array(caption, explanation, incomplete) for
+' the window (see TraceNotice). False if the user cancels: nothing more is
+' traced and no window should open.
+Private Function BuildTrace(root As Range, blnPrecedents As Boolean, listRows As Variant, notice As Variant) As Boolean
     Dim processedCells As New Collection
+    Dim rootReferences As String
     Dim maxDepth As Integer
-    maxDepth = Val(GetSetting("Breakdown", "FormulaTracing", "MaxDepth", "10"))
-    TraceSafetyLimit = Val(GetSetting("Breakdown", "FormulaTracing", "SafetyLimit", "100"))
-
-    ' Finding references moves around the workbook. Do it without running the
-    ' workbook's own event macros, then go back to the selection the trace
-    ' started from, also if it fails.
-    Dim eventsWereOn As Boolean
+    Dim threshold As Long
+    Dim firstLevelOnly As Boolean
     Dim failNumber As Long
     Dim failSource As String
     Dim failDescription As String
+
+    maxDepth = Val(GetSetting("Breakdown", "FormulaTracing", "MaxDepth", "10"))
+    TraceSafetyLimit = Val(GetSetting("Breakdown", "FormulaTracing", "SafetyLimit", "100"))
+    threshold = SecondLevelThreshold()
+
+    ' Building the trace selects cells and draws arrows; don't repaint the
+    ' sheet for each step. Finding references moves around the workbook, so
+    ' do it without running the workbook's own event macros, then go back to
+    ' the selection the trace started from, also if it fails.
+    Application.ScreenUpdating = False
+    BeginTrace blnPrecedents
+    On Error GoTo Failed
+
+    ' The traced cell's own references: found once, for the check and the trace
+    rootReferences = GetDirectReferences(root, blnPrecedents)
+    If blnPrecedents Then
+        If CellCountExceeds(rootReferences, threshold) Then
+            If Not ConfirmFirstLevelTrace(threshold) Then
+                EndTrace
+                Exit Function
+            End If
+            firstLevelOnly = True
+            maxDepth = 1
+        End If
+    End If
+
+    ' The time budget starts now, not before the user answered
+    TraceStart = Timer
+    ListReferences root, blnPrecedents, 1, maxDepth, processedCells, rootReferences
+    On Error GoTo 0
+    EndTrace
+
+    listRows = TraceListRows(root)
+    notice = TraceNotice(firstLevelOnly, threshold)
+    BuildTrace = True
+    Exit Function
+
+Failed:
+    failNumber = Err.Number
+    failSource = Err.Source
+    failDescription = Err.Description
+    EndTrace
+    Erase TraceRows
+    Erase TraceCells
+    Err.Raise failNumber, failSource, failDescription
+End Function
+
+' Start a trace from the active sheet and selection, with event macros off
+Private Sub BeginTrace(blnPrecedents As Boolean)
     Set HomeSheet = ActiveSheet
     Set HomeSelection = Selection
     Set HomeNames = DefinedNames(HomeSheet.Parent)
     Set ClearedSheets = New Collection
     TraceRowCount = 0
     ReDim TraceRows(1 To 64)
-    eventsWereOn = Application.EnableEvents
+    ReDim TraceCells(1 To 64)
+    TraceStopped = ""
+    TraceStart = Timer
+    If blnPrecedents Then TraceNoun = "precedents" Else TraceNoun = "dependents"
+    ShowedProgress = False
+    EventsBefore = Application.EnableEvents
     Application.EnableEvents = False
-    On Error GoTo Failed
-    ListReferences root, blnPrecedents, 1, maxDepth, processedCells
-    On Error GoTo 0
-    EndTrace eventsWereOn
-
-    ' The list box takes all rows at once: added one by one, they take a
-    ' quarter of a millisecond each
-    Dim listRows() As Variant
-    Dim listRow As Variant
-    Dim colonPos As Long
-    Dim traced As Range
-    Dim i As Long
-    Dim j As Long
-    Dim n As Long
-    ReDim listRows(0 To TraceRowCount, 0 To 2)
-    For j = 0 To 2
-        listRows(0, j) = rootRow(j)
-    Next j
-    For i = 1 To TraceRowCount
-        colonPos = InStr(TraceRows(i), ": ")
-        If colonPos > 0 Then
-            Set traced = Nothing
-            On Error Resume Next
-            Set traced = Range(TraceRowAddress(Mid$(TraceRows(i), colonPos + 2)))
-            On Error GoTo 0
-            listRow = TraceRow(TraceRows(i), traced)
-            n = n + 1
-            For j = 0 To 2
-                listRows(n, j) = listRow(j)
-            Next j
-        End If
-    Next i
-    Erase TraceRows
-
-    lst.Clear
-    lst.ColumnCount = 3
-    lst.List = listRows
-    lst.ListIndex = 0
-    Exit Sub
-
-Failed:
-    failNumber = Err.Number
-    failSource = Err.Source
-    failDescription = Err.Description
-    EndTrace eventsWereOn
-    Erase TraceRows
-    Err.Raise failNumber, failSource, failDescription
 End Sub
 
-' Go back to where the trace started, and run event macros again if they
-' ran before
-Private Sub EndTrace(ByVal eventsWereOn As Boolean)
+' Go back to where the trace started, run event macros again if they ran
+' before, and give the status bar back
+Private Sub EndTrace()
     On Error Resume Next
     HomeSheet.Activate
     HomeSelection.Select
-    Application.EnableEvents = eventsWereOn
+    Application.EnableEvents = EventsBefore
+    If ShowedProgress Then Application.StatusBar = StatusBefore
+    ShowedProgress = False
     Set HomeSheet = Nothing
     Set HomeSelection = Nothing
     Set HomeNames = Nothing
     Set ClearedSheets = Nothing
 End Sub
 
-' Add a row to the trace being built
-Private Sub AddTraceLine(rowText As String)
+' True if the cells in references (addresses joined with vbCr, as
+' GetDirectReferences gives them) number more than limit: a range counts as
+' all its cells, an address listed twice once, and overlapping ranges in
+' full. Counting stops as soon as it is past the limit, so a reference to a
+' whole column costs no more than one to a single cell.
+Private Function CellCountExceeds(references As String, ByVal limit As Long) As Boolean
+    Dim addresses() As String
+    Dim counted As New Collection
+    Dim target As Range
+    Dim targetAddress As String
+    Dim total As Double
+    Dim i As Long
+
+    addresses = Split(references, vbCr)
+    For i = 0 To UBound(addresses)
+        If Len(Trim$(addresses(i))) > 0 Then
+            Set target = Nothing
+            On Error Resume Next
+            Set target = Range(Trim$(addresses(i)))
+            On Error GoTo 0
+            If Not target Is Nothing Then
+                targetAddress = target.address(External:=True)
+                If Not HasKey(counted, targetAddress) Then
+                    counted.Add True, targetAddress
+                    total = total + target.CountLarge
+                    If total > limit Then
+                        CellCountExceeds = True
+                        Exit Function
+                    End If
+                End If
+            End If
+        End If
+    Next i
+End Function
+
+' Warn before tracing a cell with more direct precedents than the threshold.
+' True if the user goes ahead, with first-level tracing only.
+Private Function ConfirmFirstLevelTrace(ByVal threshold As Long) As Boolean
+    Dim message As String
+    message = "This cell contains more than " & Format$(threshold, "#,##0") & " direct precedents. " & _
+             "Analysing this cell may result in reduced performance or application instability. " & _
+             "Second-level tracing will be automatically disabled to reduce computational load." & _
+             vbNewLine & vbNewLine & "Do you want to continue anyway?"
+    Application.ScreenUpdating = True
+    ConfirmFirstLevelTrace = (MsgBox(message, vbOKCancel + vbExclamation + vbDefaultButton2, _
+                                     "Large number of precedents detected") = vbOK)
+    If ConfirmFirstLevelTrace Then Application.ScreenUpdating = False
+End Function
+
+' What the trace window says about a limited trace: Array(caption,
+' explanation, incomplete), with an empty caption if the trace went as far
+' as the settings allow. incomplete: the budget stopped the trace.
+Private Function TraceNotice(ByVal firstLevelOnly As Boolean, ByVal threshold As Long) As Variant
+    Dim captionText As String
+    Dim detail As String
+    Dim limitText As String
+
+    If firstLevelOnly Then
+        captionText = "Second-level trace disabled"
+        detail = "Second-level precedent tracing has been disabled because the number of direct " & _
+                 "precedents exceeds your configured threshold (" & Format$(threshold, "#,##0") & "). " & _
+                 "This helps maintain application performance and stability. " & _
+                 "You can adjust the threshold in Settings."
+    End If
+    If Len(TraceStopped) > 0 Then
+        If Len(captionText) = 0 Then captionText = "Trace stopped early"
+        If Len(detail) > 0 Then detail = detail & " "
+        If TraceStopped = "rows" Then
+            limitText = "after " & Format$(MAX_TRACE_ROWS, "#,##0") & " cells"
+        Else
+            limitText = "after " & MAX_TRACE_SECONDS & " seconds"
+        End If
+        detail = detail & "The trace stopped " & limitText & " to keep Excel responsive, so the list " & _
+                 "is incomplete. Select a cell and press Enter to trace from there."
+    End If
+    TraceNotice = Array(captionText, detail, Len(TraceStopped) > 0)
+End Function
+
+' True once the trace has spent its budget (see MAX_TRACE_ROWS), recording
+' which part ran out
+Private Function OverBudget() As Boolean
+    Dim elapsed As Single
+    If Len(TraceStopped) = 0 Then
+        If TraceRowCount >= MAX_TRACE_ROWS Then
+            TraceStopped = "rows"
+        Else
+            elapsed = Timer - TraceStart
+            If elapsed < 0 Then elapsed = elapsed + 86400   ' Past midnight
+            If elapsed > MAX_TRACE_SECONDS Then TraceStopped = "time"
+        End If
+    End If
+    OverBudget = (Len(TraceStopped) > 0)
+End Function
+
+' Add a row to the trace being built, for a cell or range
+Private Sub AddTraceLine(rowText As String, cell As Range)
     TraceRowCount = TraceRowCount + 1
-    If TraceRowCount > UBound(TraceRows) Then ReDim Preserve TraceRows(1 To 2 * UBound(TraceRows))
+    If TraceRowCount > UBound(TraceRows) Then
+        ReDim Preserve TraceRows(1 To 2 * UBound(TraceRows))
+        ReDim Preserve TraceCells(1 To UBound(TraceRows))
+    End If
     TraceRows(TraceRowCount) = rowText
+    Set TraceCells(TraceRowCount) = cell
+    If TraceRowCount Mod PROGRESS_ROWS = 0 Then ShowTraceProgress
 End Sub
 
-' One row of the list box: Array(row text, value, formula)
+' A long trace shows how far it has got in the status bar
+Private Sub ShowTraceProgress()
+    On Error Resume Next
+    If Not ShowedProgress Then StatusBefore = Application.StatusBar
+    ShowedProgress = True
+    Application.StatusBar = "Breakdown: tracing " & TraceNoun & "... " & Format$(TraceRowCount, "#,##0") & " cells"
+End Sub
+
+' The rows for the trace window: the traced cell, then the trace rows. The
+' trace's own rows are let go.
+Private Function TraceListRows(root As Range) As Variant
+    Dim listRows() As Variant
+    Dim listRow As Variant
+    Dim i As Long
+    Dim j As Long
+
+    ReDim listRows(0 To TraceRowCount, 0 To 2)
+    listRow = TraceRow(root.Worksheet.Name & "!" & root.address, root)
+    For j = 0 To 2
+        listRows(0, j) = listRow(j)
+    Next j
+    For i = 1 To TraceRowCount
+        listRow = TraceRow(TraceRows(i), TraceCells(i))
+        For j = 0 To 2
+            listRows(i, j) = listRow(j)
+        Next j
+    Next i
+    Erase TraceRows
+    Erase TraceCells
+    TraceListRows = listRows
+End Function
+
+' One row of the trace window: Array(row text, value, formula)
 Private Function TraceRow(rowText As String, cell As Range) As Variant
     If cell Is Nothing Then
         TraceRow = Array(rowText, "#N/A", "#N/A")
-    ElseIf cell.Cells.Count = 1 Then
+    ElseIf cell.CountLarge = 1 Then
         TraceRow = Array(rowText, GetCellValueAsString(cell), CStr(cell.formula))
-    Else
+    ElseIf cell.CountLarge <= MAX_RANGE_VALUE_CELLS Then
         ' A range such as F3:F9 has no single formula (.Formula is an array)
         TraceRow = Array(rowText, GetCellValueAsString(cell), "")
+    Else
+        TraceRow = Array(rowText, "", "")
     End If
 End Function
 
@@ -204,9 +398,15 @@ End Function
 
 
 ' Add the rows for aCell's references (or the cells referring to it) to the
-' trace, each followed by the rows for its own, depth first
-Private Sub ListReferences(aCell As Range, blnPrecedents As Boolean, currentLevel As Integer, maxLevel As Integer, processedCells As Collection)
+' trace, each followed by the rows for its own, depth first. knownReferences:
+' aCell's references if already found, as GetDirectReferences gives them.
+' Once the budget is spent (see OverBudget) nothing more is traced; only the
+' traced cell's own references (level 1) are still listed, so the first
+' level stays whole, and a range among them stops listing its cells.
+Private Sub ListReferences(aCell As Range, blnPrecedents As Boolean, currentLevel As Integer, maxLevel As Integer, processedCells As Collection, _
+                           Optional knownReferences As Variant)
     If currentLevel > maxLevel Then Exit Sub
+    If OverBudget() Then Exit Sub
 
     ' Each cell is traced once; this also stops circular references
     Dim cellKey As String
@@ -223,7 +423,11 @@ Private Sub ListReferences(aCell As Range, blnPrecedents As Boolean, currentLeve
     Dim isDuplicate As Boolean
     Dim i As Long
     Dim j As Long
-    precedentAddresses = Split(GetDirectReferences(aCell, blnPrecedents), vbCr)
+    If IsMissing(knownReferences) Then
+        precedentAddresses = Split(GetDirectReferences(aCell, blnPrecedents), vbCr)
+    Else
+        precedentAddresses = Split(CStr(knownReferences), vbCr)
+    End If
     ReDim listedAddresses(0 To UBound(precedentAddresses) + 1)
     For i = 0 To UBound(precedentAddresses)
         If Len(Trim(precedentAddresses(i))) > 0 Then
@@ -278,26 +482,31 @@ Private Sub ListReferences(aCell As Range, blnPrecedents As Boolean, currentLeve
     ReDim listed(0 To precedentsList.Count)
     rowStart = String(currentLevel * 2, " ") & "L" & currentLevel & ": "
     For Each refRow In refRows
+        If currentLevel > 1 Then
+            If OverBudget() Then Exit Sub
+        End If
         Set precedent = precedentsList(refRow(0))
         precedentAddress = listedAddresses(refRow(0))
         If refRow(1) > 0 Then note = ROW_REF & refRow(1) & ")" Else note = ""
         If listed(refRow(0)) Then
-            AddTraceLine rowStart & precedentAddress & note & ROW_AGAIN
-        ElseIf precedent.Cells.Count > 1 Then
-            ' A range: list it, then each of its cells one level deeper
-            AddTraceLine rowStart & precedentAddress & note
+            AddTraceLine rowStart & precedentAddress & note & ROW_AGAIN, precedent
+        ElseIf precedent.CountLarge > 1 Then
+            ' A range: list it, then each of its cells one level deeper.
+            ' (CountLarge: a whole sheet has more cells than a Long holds.)
+            AddTraceLine rowStart & precedentAddress & note, precedent
             For Each cell In precedent.Cells
+                If OverBudget() Then Exit For
                 cellAddress = cell.address(External:=True)
                 If Not HasKey(processedCells, cellAddress) Then
-                    AddTraceLine String((currentLevel + 1) * 2, " ") & "L" & (currentLevel + 1) & ": " & cellAddress & ROW_FROM_RANGE & precedentAddress & ")"
+                    AddTraceLine String((currentLevel + 1) * 2, " ") & "L" & (currentLevel + 1) & ": " & cellAddress & ROW_FROM_RANGE & precedentAddress & ")", cell
                     ListReferences cell, blnPrecedents, currentLevel + 2, maxLevel, processedCells
                 End If
             Next cell
         ElseIf Not HasKey(processedCells, precedentAddress) Then
-            AddTraceLine rowStart & precedentAddress & note
+            AddTraceLine rowStart & precedentAddress & note, precedent
             ListReferences precedent, blnPrecedents, currentLevel + 1, maxLevel, processedCells
         ElseIf blnPrecedents Then
-            AddTraceLine rowStart & precedentAddress & note & ROW_AGAIN
+            AddTraceLine rowStart & precedentAddress & note & ROW_AGAIN, precedent
         End If
         listed(refRow(0)) = True
     Next refRow

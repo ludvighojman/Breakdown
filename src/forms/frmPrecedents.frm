@@ -69,6 +69,14 @@ Private WithEvents txtKeys As MSForms.TextBox
 Private WithEvents lblListHit As MSForms.Label
 Private WithEvents scrList As MSForms.ScrollBar
 
+' Notice at the top right when TraceUtils limited the trace (see SetNotice):
+' its caption and explanation, shown on hover and on click, and whether the
+' list is incomplete
+Private WithEvents lblNotice As MSForms.Label
+Private NoticeCaption As String
+Private NoticeDetail As String
+Private TraceIncomplete As Boolean
+
 ' Resizer functionality
 Private FormResizer As clResizer
 Private MinWidth As Single
@@ -105,6 +113,7 @@ Private Const SCROLLBAR_WIDTH As Long = 12
 Private Const CAPTION_HEIGHT As Long = 14
 Private Const ESC_WIDTH As Long = 28            ' The "esc" hint box in the top bar
 Private Const ESC_HEIGHT As Long = 16
+Private Const MIN_FILTER_WIDTH As Long = 80     ' Narrower, and the notice shows only its sign
 
 ' Corner radii of the rounded boxes (see PlaceRoundBox)
 Private Const CHIP_RADIUS As Single = 4
@@ -187,6 +196,7 @@ Private ColorRail As Long           ' Tree lines
 Private ColorText As Long
 Private ColorSecondary As Long
 Private ColorCaption As Long
+Private ColorWarning As Long        ' The notice of a limited trace
 
 
 ' ---------------------------------------------------------------------------
@@ -213,10 +223,21 @@ Public Sub SetHistory(history As Collection)
     End If
 End Sub
 
-' Build the tree from the rows TraceUtils put in the designer list box and
-' show it with the traced cell selected
-Public Sub ConvertToTreeView()
-    ParseListBoxToTree
+' Say at the top right that the trace was limited: captionText ("" for no
+' notice), the explanation shown on hover and on click, and whether the list
+' is incomplete (the count then ends in "+"). Call before ConvertToTreeView.
+Public Sub SetNotice(ByVal captionText As String, ByVal detailText As String, ByVal incomplete As Boolean)
+    NoticeCaption = captionText
+    NoticeDetail = detailText
+    TraceIncomplete = incomplete
+    lblNotice.ControlTipText = detailText
+    lblNotice.Visible = (Len(captionText) > 0)
+End Sub
+
+' Build the tree from the trace rows TraceUtils made, listRows(0 To n, 0 To 2)
+' of row text, value and formula, and show it with the traced cell selected
+Public Sub ConvertToTreeView(listRows As Variant)
+    ParseRowsToTree listRows
     SelectedRow = 0
     TopRow = 0
     RefreshTree
@@ -255,7 +276,8 @@ Private Sub UserForm_Initialize()
     SelectedRow = -1
     Set TraceHistory = New Collection
 
-    ' The designer list box only carries the trace rows from TraceUtils
+    ' The designer list box is unused: TraceUtils hands the rows over directly
+    ' (see ConvertToTreeView)
     lstPrecedents.Visible = False
 
     ' Backgrounds and rules first, so everything added after them is on top
@@ -280,6 +302,20 @@ Private Sub UserForm_Initialize()
     End With
     AddTextLabel("lblSheetName", "", CAPTION_SIZE + 1, False, ColorSecondary).TextAlign = fmTextAlignRight
     AddTextLabel("lblEscHint", "esc", CAPTION_SIZE, False, ColorSecondary).TextAlign = fmTextAlignCenter
+
+    ' Notice of a limited trace, hidden unless SetNotice gives one; sized to
+    ' its text. Windows draws the warning sign from Segoe UI Symbol; the Mac
+    ' finds it in a system font.
+    Set lblNotice = AddTextLabel("lblNotice", "", CAPTION_SIZE + 1, False, ColorWarning)
+    With lblNotice
+#If Mac Then
+        .Font.Name = SystemFontName()
+#Else
+        .Font.Name = "Segoe UI Symbol"
+#End If
+        .AutoSize = True
+        .Visible = False
+    End With
 
     ' Formula card: caption and value; the formula itself is laid out as tokens
     AddTextLabel "lblCardCaption", "FORMULA", CAPTION_SIZE, True, ColorCaption
@@ -358,6 +394,7 @@ Private Sub LoadTheme()
         ColorText = &H1B1D1A            ' RGB(26, 29, 27)
         ColorSecondary = &H5A6058       ' RGB(88, 96, 90)
         ColorCaption = &H787D76         ' RGB(118, 125, 120)
+        ColorWarning = &H5F96&          ' RGB(150, 95, 0)
     Else
         ColorWindow = &H121412          ' RGB(18, 20, 18)
         ColorCard = &H1A1C19            ' RGB(25, 28, 26)
@@ -371,6 +408,7 @@ Private Sub LoadTheme()
         ColorText = &HEBEEEA            ' RGB(234, 238, 235)
         ColorSecondary = &HA7ACA5       ' RGB(165, 172, 167)
         ColorCaption = &H757A73         ' RGB(115, 122, 117)
+        ColorWarning = &H50B4E8         ' RGB(232, 180, 80)
     End If
 End Sub
 
@@ -838,13 +876,18 @@ Private Function HandleNavigationKey(ByVal keyValue As Integer, ByVal Shift As I
                 ' Enter: go to the cell and open a new trace rooted at it, so
                 ' the user can drill deeper one level at a time. This window
                 ' is kept, hidden, so Shift+Enter can bring it back as it is.
+                ' It stays open if no new window opens (the user cancelled at
+                ' a warning).
                 nodeIndex = SelectedNodeIndex()
                 If nodeIndex > 0 Then
                     If NavigateToCell(NodeAddress(nodeIndex)) Then
                         RememberWindowSize
                         TraceHistory.Add Me
-                        TraceUtils.ShowTracePrecedents TraceHistory
-                        Me.Hide
+                        If TraceUtils.ShowTracePrecedents(TraceHistory) Then
+                            Me.Hide
+                        Else
+                            TraceHistory.Remove TraceHistory.Count
+                        End If
                     End If
                 End If
             End If
@@ -883,6 +926,13 @@ End Sub
 
 Private Sub scrList_Scroll()
     scrList_Change
+End Sub
+
+' The notice's explanation, also where the Mac shows no tooltip
+Private Sub lblNotice_Click()
+    MsgBox NoticeDetail, vbInformation, NoticeCaption
+    On Error Resume Next
+    txtKeys.SetFocus
 End Sub
 
 ' ---------------------------------------------------------------------------
@@ -1052,14 +1102,16 @@ End Sub
 ' Tree
 ' ---------------------------------------------------------------------------
 
-' Parse existing ListBox indented structure into tree nodes
-Private Sub ParseListBoxToTree()
+' Turn the indented trace rows into tree nodes
+Private Sub ParseRowsToTree(listRows As Variant)
     TreeCount = 0
 
-    Dim i As Integer
-    For i = 0 To lstPrecedents.ListCount - 1
+    Dim i As Long
+    Dim rowCount As Long
+    rowCount = UBound(listRows, 1) + 1
+    For i = 0 To rowCount - 1
         Dim addressText As String
-        addressText = lstPrecedents.List(i, 0)
+        addressText = listRows(i, 0)
 
         ' Extract level from indentation
         Dim level As Integer
@@ -1072,17 +1124,17 @@ Private Sub ParseListBoxToTree()
         ' Check if this node has children (next item has higher level)
         Dim hasChildren As Boolean
         hasChildren = False
-        If i < lstPrecedents.ListCount - 1 Then
+        If i < rowCount - 1 Then
             Dim nextLevel As Integer
-            nextLevel = GetIndentationLevel(lstPrecedents.List(i + 1, 0))
+            nextLevel = GetIndentationLevel(CStr(listRows(i + 1, 0)))
             hasChildren = (nextLevel > level)
         End If
 
         ' Store original data for this node
         Dim originalData As String
-        originalData = lstPrecedents.List(i, 0) & "|" & _
-                      lstPrecedents.List(i, 1) & "|" & _
-                      lstPrecedents.List(i, 2)
+        originalData = listRows(i, 0) & "|" & _
+                      listRows(i, 1) & "|" & _
+                      listRows(i, 2)
 
         ' The traced cell starts expanded to show the first level immediately
         AddTreeNode cleanText, level, (level = 0), hasChildren, originalData
@@ -1158,52 +1210,44 @@ Private Sub RefreshTree()
     RenderRows
 End Sub
 
-' Update visibility from the expand state, or from the filter while one is typed
+' Update visibility from the expand state, or from the filter while one is
+' typed. Each is one pass over the tree, so a large one stays quick: a row's
+' parent is the last row before it one level up (rows go at most one level
+' deeper than the row before them).
 Private Sub UpdateVisibility()
-    Dim i As Integer, j As Integer
-    Dim parentLevel As Integer
+    Dim i As Long
+    Dim level As Integer
     Dim filterText As String
+    Dim flags() As Boolean
     If Not txtFilter Is Nothing Then filterText = LCase$(Trim$(txtFilter.text))
+    ReDim flags(0 To 16)
 
     If Len(filterText) > 0 Then
-        ' Matching rows and every row above them in the tree
-        For i = 1 To TreeCount
-            TreeData(i).IsVisible = False
-        Next i
-        For i = 1 To TreeCount
-            If NodeMatches(i, filterText) Then
-                j = i
-                Do While j > 0
-                    TreeData(j).IsVisible = True
-                    j = ParentNode(j)
-                Loop
-            End If
+        ' Matching rows and every row above them in the tree: from the end,
+        ' a row shows if it matches or a row under it shows. flags(k): a row
+        ' at level k shows under the row at level k - 1 that comes next.
+        For i = TreeCount To 1 Step -1
+            level = TreeData(i).level
+            If level + 1 > UBound(flags) Then ReDim Preserve flags(0 To 2 * (level + 1))
+            TreeData(i).IsVisible = flags(level + 1)
+            If Not TreeData(i).IsVisible Then TreeData(i).IsVisible = NodeMatches(i, filterText)
+            flags(level + 1) = False
+            If TreeData(i).IsVisible Then flags(level) = True
         Next i
         Exit Sub
     End If
 
-    ' First, make all root nodes (level 0) visible
+    ' The traced cell (level 0), and every row whose parent shows and is
+    ' expanded. flags(k): the last row at level k shows and is expanded.
     For i = 1 To TreeCount
-        TreeData(i).IsVisible = (TreeData(i).level = 0)
-    Next i
-
-    ' Then, make child nodes visible if their parent is expanded
-    For i = 1 To TreeCount
-        If TreeData(i).level > 0 Then
-            parentLevel = TreeData(i).level - 1
-
-            ' Look backwards for the parent
-            For j = i - 1 To 1 Step -1
-                If TreeData(j).level = parentLevel Then
-                    If TreeData(j).IsVisible And TreeData(j).IsExpanded Then
-                        TreeData(i).IsVisible = True
-                    End If
-                    Exit For
-                ElseIf TreeData(j).level < parentLevel Then
-                    Exit For
-                End If
-            Next j
+        level = TreeData(i).level
+        If level + 1 > UBound(flags) Then ReDim Preserve flags(0 To 2 * (level + 1))
+        If level = 0 Then
+            TreeData(i).IsVisible = True
+        Else
+            TreeData(i).IsVisible = flags(level - 1)
         End If
+        flags(level) = TreeData(i).IsVisible And TreeData(i).IsExpanded
     Next i
 End Sub
 
@@ -1225,8 +1269,10 @@ Private Sub ComputeRails()
     Dim level As Integer
     Dim hasNext As Boolean
     Dim parentRails As String
+    Dim railsAt() As String     ' Rails of the last row at each level: a row's parent is the last one level up
 
     ReDim VisibleRails(1 To VisibleCount + 1)
+    ReDim railsAt(0 To 16)
     For i = 1 To VisibleCount
         level = TreeData(VisibleNodes(i)).level
         hasNext = False
@@ -1238,18 +1284,14 @@ Private Sub ComputeRails()
             End If
         Next j
 
-        parentRails = ""
-        For j = i - 1 To 1 Step -1
-            If TreeData(VisibleNodes(j)).level < level Then
-                parentRails = VisibleRails(j)
-                Exit For
-            End If
-        Next j
+        If level > UBound(railsAt) Then ReDim Preserve railsAt(0 To 2 * level)
         If level = 0 Then
             VisibleRails(i) = ""
         Else
+            parentRails = railsAt(level - 1)
             VisibleRails(i) = Left$(parentRails & String(level, "0"), level - 1) & IIf(hasNext, "1", "0")
         End If
+        railsAt(level) = VisibleRails(i)
     Next i
 End Sub
 
@@ -1801,10 +1843,11 @@ Private Sub UpdateStatus()
             End If
         Next i
         Me.Controls("lblCount").Caption = CStr(shownCount)
-        Me.Controls("lblStatus").Caption = " of " & UniqueCount & " precedents shown"
+        Me.Controls("lblStatus").Caption = " of " & UniqueCount & IIf(TraceIncomplete, "+", "") & " precedents shown"
     Else
-        Me.Controls("lblCount").Caption = CStr(UniqueCount)
-        Me.Controls("lblStatus").Caption = IIf(UniqueCount = 1, " precedent", " precedents")
+        ' "+": the trace stopped early, so there are more
+        Me.Controls("lblCount").Caption = CStr(UniqueCount) & IIf(TraceIncomplete, "+", "")
+        Me.Controls("lblStatus").Caption = IIf(UniqueCount = 1 And Not TraceIncomplete, " precedent", " precedents")
     End If
     LayoutFooterText
 End Sub
@@ -1948,12 +1991,24 @@ Private Sub ResizeControls()
     ' "esc" hint: an outlined rounded box at the right
     Dim escLeft As Single
     Dim escTop As Single
+    Dim barRight As Single
     escLeft = w - PADDING - ESC_WIDTH
     escTop = Int((TOP_BAR_HEIGHT - ESC_HEIGHT) / 2)
     PlaceRoundBox "lblEsc", escLeft, escTop, ESC_WIDTH, ESC_HEIGHT, ColorCard, CHIP_RADIUS, ColorWindow, ColorCardBorder
     Me.Controls("lblEscHint").Move escLeft + TEXT_NUDGE_X, TextTop(escTop, ESC_HEIGHT, CAPTION_SIZE), ESC_WIDTH, TextLineHeight(CAPTION_SIZE)
-    Me.Controls("lblSheetName").Move escLeft - 8 - 120, barTextTop, 120, CAPTION_HEIGHT + 2
-    filterRight = escLeft - 8 - 120 - 8
+
+    ' The notice of a limited trace, if any, just left of it: in full while
+    ' the filter keeps its room, else only the warning sign (hover or click
+    ' it for the explanation)
+    barRight = escLeft - 8
+    If Len(NoticeCaption) > 0 Then
+        lblNotice.Caption = ChrW(&H26A0) & " " & NoticeCaption
+        If barRight - lblNotice.Width - 8 - 120 - 8 < x + MIN_FILTER_WIDTH Then lblNotice.Caption = ChrW(&H26A0)
+        lblNotice.Move barRight - lblNotice.Width, barTextTop
+        barRight = barRight - lblNotice.Width - 8
+    End If
+    Me.Controls("lblSheetName").Move barRight - 120, barTextTop, 120, CAPTION_HEIGHT + 2
+    filterRight = barRight - 120 - 8
     If filterRight < x + 40 Then filterRight = x + 40
     Me.Controls("lblFilterHint").Move x + 2, barTextTop, filterRight - x - 2, CAPTION_HEIGHT + 2
     txtFilter.Move x, barTextTop - 3, filterRight - x, CAPTION_HEIGHT + 8

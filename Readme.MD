@@ -21,7 +21,7 @@ Just a single file to download and you're good to go!!!
 | **Horizontal Consistency** | Marks each formula on the sheet green or red, depending on whether it matches the formula next to it. |
 | **Error Wrap** | Wraps the selected formulas in `IFERROR`. |
 | **Auto-color Numbers** | Colours the selection by the financial-modelling convention: blue inputs, black formulas, green links to other sheets, red external links and errors. Inputs also get a fill and border you design in Settings. |
-| **Settings** | Change the colours Auto-color Numbers uses, the fill and border of input cells, the Error Wrap fallback value, how deep traces go, and the trace window's theme. |
+| **Settings** | Change the colours Auto-color Numbers uses, the fill and border of input cells, the Error Wrap fallback value, how deep traces go, when large traces stop at the first level, and the trace window's theme. |
 
 ## Install
 
@@ -104,6 +104,11 @@ Select a cell and click **Trace Precedents** (or **Trace Dependents**). A window
 Clicking a row also takes Excel to that cell, and clicking the arrow next to a cell expands or collapses it. Drag the dots in the bottom-right corner to resize the window; the next trace window opens at the same size.
 
 The trace window comes in a dark and a light theme. Choose one in **Settings → Formula Tracing**; it applies to the next trace window you open.
+
+Large traces are kept in check so Excel stays responsive:
+
+- If a cell has more than 50 direct precedents (a range counts as all its cells, so `SUM(A1:A60)` counts as 60), Trace Precedents warns you first. If you continue, it lists only the cell's direct precedents, and the window shows **⚠ Second-level trace disabled**. Press Enter on any of them to trace from there. Change the limit with **Second-level precedent tracing threshold** in **Settings → Formula Tracing**.
+- A trace stops after 10,000 cells or 30 seconds. The window then shows **⚠ Trace stopped early**, and the count ends in "+". The traced cell's own references are always listed in full.
 
 ### Horizontal Consistency
 

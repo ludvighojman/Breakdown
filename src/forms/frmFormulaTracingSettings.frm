@@ -4,6 +4,7 @@ Private txtMaxDepth As MSForms.TextBox
 Private lblMaxDepth As MSForms.Label
 Private txtSafetyLimit As MSForms.TextBox
 Private lblSafetyLimit As MSForms.Label
+Private txtSecondLevelThreshold As MSForms.TextBox
 Private optThemeDark As MSForms.OptionButton
 Private optThemeLight As MSForms.OptionButton
 Private btnSave As MSForms.CommandButton
@@ -91,13 +92,48 @@ Public Sub InitializeInPanel(parentFrame As MSForms.Frame)
         .Font.Size = 8
         .ForeColor = &H808080
     End With
-    
+
+    ' Most direct precedents for which the trace goes past the first level
+    Dim lblSecondLevelThreshold As MSForms.Label
+    Set lblSecondLevelThreshold = parentFrame.Controls.Add("Forms.Label.1", "lblSecondLevelThreshold")
+    With lblSecondLevelThreshold
+        .Left = 10
+        .Top = 140
+        .Width = 300
+        .Height = 15
+        .Caption = "Second-level precedent tracing threshold:"
+    End With
+
+    Set txtSecondLevelThreshold = parentFrame.Controls.Add("Forms.TextBox.1", "txtSecondLevelThreshold")
+    With txtSecondLevelThreshold
+        .Left = 10
+        .Top = 160
+        .Width = 100
+        .Height = 20
+        .text = CStr(TraceUtils.SecondLevelThreshold())
+    End With
+
+    Dim lblSecondLevelThresholdDesc As MSForms.Label
+    Set lblSecondLevelThresholdDesc = parentFrame.Controls.Add("Forms.Label.1", "lblSecondLevelThresholdDesc")
+    With lblSecondLevelThresholdDesc
+        .Left = 120
+        .Top = 160
+        .Width = 280
+        .Height = 48
+        .WordWrap = True
+        .Caption = "Maximum number of direct precedents for which second-level precedent tracing is " & _
+                   "automatically enabled. Cells exceeding this threshold will trigger a performance " & _
+                   "warning and use first-level tracing only."
+        .Font.Size = 8
+        .ForeColor = &H808080
+    End With
+
     ' Theme of the trace windows
     Dim lblTheme As MSForms.Label
     Set lblTheme = parentFrame.Controls.Add("Forms.Label.1", "lblTheme")
     With lblTheme
         .Left = 10
-        .Top = 140
+        .Top = 218
         .Width = 300
         .Height = 15
         .Caption = "Trace window theme:"
@@ -111,7 +147,7 @@ Public Sub InitializeInPanel(parentFrame As MSForms.Frame)
     Set btnSave = parentFrame.Controls.Add("Forms.CommandButton.1", "btnSave")
     With btnSave
         .Left = 10
-        .Top = 200
+        .Top = 278
         .Width = 100
         .Height = 25
         .Caption = "Save Settings"
@@ -121,7 +157,7 @@ Public Sub InitializeInPanel(parentFrame As MSForms.Frame)
     Set btnReset = parentFrame.Controls.Add("Forms.CommandButton.1", "btnReset")
     With btnReset
         .Left = 120
-        .Top = 200
+        .Top = 278
         .Width = 100
         .Height = 25
         .Caption = "Reset to Default"
@@ -140,7 +176,7 @@ Private Function AddThemeOption(parentFrame As MSForms.Frame, ctlName As String,
     Set opt = parentFrame.Controls.Add("Forms.OptionButton.1", ctlName)
     With opt
         .Left = leftPos
-        .Top = 158
+        .Top = 236
         .Width = 65
         .Height = 18
         .Caption = captionText
@@ -196,11 +232,16 @@ Public Sub btnSave_Click()
         MsgBox "Safety Navigation Limit must be between 10 and 1000.", vbExclamation
         Exit Sub
     End If
+
+    If Not TraceUtils.IsPositiveWholeNumber(Trim$(txtSecondLevelThreshold.text)) Then
+        MsgBox "Second-level precedent tracing threshold must be a whole number of 1 or more.", vbExclamation
+        Exit Sub
+    End If
     
     ' Save to registry
-    SaveFormulaTracingSettings maxDepth, safetyLimit, SelectedTheme()
+    SaveFormulaTracingSettings maxDepth, safetyLimit, CLng(Trim$(txtSecondLevelThreshold.text)), SelectedTheme()
     
-    MsgBox "Formula Tracing settings saved. A new theme applies to the next trace window you open.", vbInformation
+    MsgBox "Formula Tracing settings saved. They apply to the next trace window you open.", vbInformation
     Exit Sub
     
 ErrorHandler:
@@ -215,16 +256,18 @@ Public Sub btnReset_Click()
     result = MsgBox("Reset Formula Tracing settings to default values?" & vbNewLine & _
                    "Max Depth: 10" & vbNewLine & _
                    "Safety Limit: 100" & vbNewLine & _
+                   "Second-level threshold: " & DEFAULT_SECOND_LEVEL_THRESHOLD & vbNewLine & _
                    "Theme: Dark", vbYesNo + vbQuestion, "Reset Settings")
     
     If result = vbYes Then
         ' Reset to defaults
         txtMaxDepth.text = "10"
         txtSafetyLimit.text = "100"
+        txtSecondLevelThreshold.text = CStr(DEFAULT_SECOND_LEVEL_THRESHOLD)
         ShowTheme "Dark"
         
         ' Save defaults to registry
-        SaveFormulaTracingSettings 10, 100, "Dark"
+        SaveFormulaTracingSettings 10, 100, DEFAULT_SECOND_LEVEL_THRESHOLD, "Dark"
         
         MsgBox "Settings reset to default values!", vbInformation
     End If
@@ -248,12 +291,13 @@ Private Function GetSavedSafetyLimit() As String
     On Error GoTo 0
 End Function
 
-Private Sub SaveFormulaTracingSettings(maxDepth As Long, safetyLimit As Long, themeName As String)
+Private Sub SaveFormulaTracingSettings(maxDepth As Long, safetyLimit As Long, ByVal threshold As Long, themeName As String)
     On Error GoTo ErrorHandler
     
     ' Save to the user's preferences (the registry on Windows, a plist on Mac)
     SaveSetting "Breakdown", "FormulaTracing", "MaxDepth", CStr(maxDepth)
     SaveSetting "Breakdown", "FormulaTracing", "SafetyLimit", CStr(safetyLimit)
+    SaveSetting "Breakdown", "FormulaTracing", "SecondLevelThreshold", CStr(threshold)
     SaveSetting "Breakdown", "FormulaTracing", "Theme", themeName
     
     Exit Sub
